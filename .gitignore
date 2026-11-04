@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environment (uv recreates it with `uv sync`)
+.venv/
+
+# Secrets: never commit API keys (NFR-04)
+.env
+.env.*
+!.env.example
+
+# Test and tool caches
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# Run outputs (harness results, evaluation reports)
+out/
+logs/
+*.log
+
+# Generated stores, rebuilt from source on first run
+chroma_db/
+pgdata/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
