@@ -8,16 +8,16 @@ CloudServe-Support/
 │       ├── __init__.py
 │       ├── app/
 │       │   ├── __init__.py
-│       │   ├── main.py          FastAPI, POST /tickets
-│       │   └── schemas.py       Pydantic models
+│       │   ├── main.py          * FastAPI, POST /tickets
+│       │   └── schemas.py       * Pydantic Ticket and Response models
 │       ├── pipeline/
 │       │   ├── __init__.py
-│       │   ├── ingest.py        cleaning, validation, name masking
-│       │   └── graph.py         placeholder for now
+│       │   ├── ingest.py        * cleaning, validation, name masking
+│       │   └── graph.py         * LangGraph flow 
 │       └── harness/
 │           ├── __init__.py
 │           └── __main__.py      --input / --output runner
-├── data/                        stays at root (not code)
+├── data/                        * tickets,docs, groundtruth JSON 
 ├── prompts/                     stays at root (versioned prompt files)
 ├── tests/                       stays at root
 ├── .env.example
