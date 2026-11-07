@@ -32,6 +32,7 @@ class ReasonCode(str, Enum):
     MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
     KILL_SWITCH = "KILL_SWITCH"
     INVALID_INPUT = "INVALID_INPUT"  # added in Stage 3; revision log entry 1
+    PIPELINE_ERROR = "PIPELINE_ERROR"  # revision log entry 2
 
 
 class TicketIn(BaseModel):

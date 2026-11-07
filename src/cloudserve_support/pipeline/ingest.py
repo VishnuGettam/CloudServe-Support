@@ -14,6 +14,9 @@ from typing import Any
 from pydantic import ValidationError
 
 from cloudserve_support.app.schemas import NormalisedTicket, TicketIn
+from cloudserve_support.errors import InvalidTicket, safe_ticket_id
+
+__all__ = ["InvalidTicket", "clean_email", "hash_input", "ingest", "mask_name"]
 
 MASK = "[CUSTOMER]"
 
@@ -31,19 +34,6 @@ _SIGNOFF = re.compile(
 )
 _SPACES = re.compile(r"[ \t]+")
 _BLANK_LINES = re.compile(r"\n{3,}")
-
-
-class InvalidTicket(Exception):
-    """Raised when a ticket cannot be turned into the internal format.
-
-    Callers turn this into an escalation with reason INVALID_INPUT; a ticket
-    is never silently dropped.
-    """
-
-    def __init__(self, ticket_id: str | None, detail: str) -> None:
-        super().__init__(detail)
-        self.ticket_id = ticket_id
-        self.detail = detail
 
 
 def clean_email(body: str) -> str:
@@ -97,19 +87,21 @@ def ingest(raw: dict[str, Any]) -> NormalisedTicket:
     """Validate, clean and mask one raw ticket.
 
     Raises InvalidTicket if the ticket does not match the schema or has no
-    usable text after cleaning.
+    usable text after cleaning. Any other exception is a bug; the caller
+    (pipeline.graph.handle) turns it into a PIPELINE_ERROR escalation.
     """
-    ticket_id = raw.get("ticket_id") if isinstance(raw, dict) else None
+    ticket_id = safe_ticket_id(raw)
     if not isinstance(raw, dict):
-        raise InvalidTicket(None, "ticket is not a JSON object")
+        raise InvalidTicket("ticket is not a JSON object", ticket_id)
 
     try:
         ticket = TicketIn.model_validate(raw)
     except ValidationError as exc:
-        fields = ", ".join(
-            ".".join(str(p) for p in err["loc"]) or "ticket" for err in exc.errors()
+        # Field names only, never values: values may contain customer text.
+        problems = sorted(
+            {f"{'.'.join(str(p) for p in err['loc']) or 'ticket'} ({err['type']})" for err in exc.errors()}
         )
-        raise InvalidTicket(ticket_id, f"schema validation failed: {fields}") from exc
+        raise InvalidTicket(f"schema validation failed: {', '.join(problems)}", ticket_id) from exc
 
     body = clean_email(ticket.body) if ticket.channel == "email" else ticket.body
     body = normalise_whitespace(body)
@@ -119,7 +111,7 @@ def ingest(raw: dict[str, Any]) -> NormalisedTicket:
     subject = mask_name(subject, ticket.customer_name)
 
     if not body:
-        raise InvalidTicket(ticket.ticket_id, "ticket body is empty after cleaning")
+        raise InvalidTicket("ticket body is empty after cleaning", ticket.ticket_id)
 
     text = f"{subject}\n{body}" if subject else body
 
