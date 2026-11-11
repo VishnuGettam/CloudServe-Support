@@ -1,0 +1,130 @@
+# Policy gate configuration (FR-04). Version-controlled: every change is a
+# commit, and the decision log records which version made each decision.
+version: "1.0"
+
+# Never answered automatically, whatever the classifier's confidence.
+# Source: client labels (must_not_auto_respond) and Stage 1 Disagreement 3.
+blocked_intents:
+  - security_incident
+  - compliance_request
+  - feature_request
+  - unclear_request
+
+# Keyword safety net. Runs on the ticket text independently of the classifier,
+# so a misclassified security ticket is still caught. Case-insensitive regex.
+keyword_groups:
+  security:
+    - compromis
+    - breach
+    - \bexposed\b
+    - \bleak(ed|s)?\b
+    - unauthori[sz]ed
+    - unrecogni[sz]ed (activity|login|access|sign)
+    - nobody (on the team )?claims
+    - former (employee|team member|staff)
+    - still (has|have) access
+    - committed (it |a key |the key )?to a public
+    - public (repo|repository|github)
+    - pushed .{0,30}(public|github)
+    - \bhack(ed|er)?\b
+    - \bstolen\b
+    - suspicious
+    - none of us recogni[sz]e
+  compliance:
+    - \bauditor
+    - audit evidence
+    - access records
+    - evidence for (a|our) compliance
+    - retention polic
+    - policy requires
+    - demonstrate (that|compliance)
+    - \bgdpr\b
+    - \bhipaa\b
+    - soc ?2
+  feature:
+    - roadmap
+    - please add
+    - feature request
+    - would be (very )?useful
+    - are you considering
+    - something you are considering
+    - is (that|this|it) (something )?planned
+
+# Answered only above a stricter confidence threshold (FR-06).
+sensitive_intents:
+  - data_residency
+billing_dispute_patterns:
+  - refund
+  - \bdispute
+  - overcharg
+  - charged (twice|incorrectly|wrongly)
+  - (do not|don't|dont) (believe we|think we) use
+  - not (using|in use)
+  - wrong(ly)? (charge|bill)
+  - \bcredit (note|back)
+
+# A ticket is treated as unclear when it is short AND names none of these.
+unclear_max_words: 20
+product_terms:
+  - api
+  - key
+  - token
+  - login
+  - log in
+  - sign in
+  - password
+  - mfa
+  - sso
+  - saml
+  - deploy
+  - build
+  - container
+  - health check
+  - rollback
+  - roll back
+  - revision
+  - webhook
+  - latency
+  - slow
+  - timeout
+  - scal
+  - database
+  - connection
+  - backup
+  - restore
+  - invoice
+  - bill
+  - charge
+  - plan
+  - quota
+  - limit
+  - overage
+  - spend
+  - export
+  - region
+  - residency
+  - integration
+  - pipeline
+  - ci
+  - log
+  - monitor
+  - environment variable
+  - secret
+  - config
+  - permission
+  - role
+  - team member
+  - project
+  - organisation
+  - organization
+  - pagination
+  - cursor
+  - iteration
+  - signature
+  - deliver
+  - event
+  - record
+  - audit
+  - endpoint
+  - "\\b[45]\\d\\d\\b"  # HTTP status codes such as 401 or 429
+  - error
