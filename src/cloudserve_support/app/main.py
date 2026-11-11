@@ -10,6 +10,7 @@ Error handling:
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Body, FastAPI, Request
@@ -20,12 +21,23 @@ from fastapi.responses import JSONResponse
 from cloudserve_support.app.schemas import ReasonCode, TicketResult
 from cloudserve_support.errors import describe
 from cloudserve_support.logging_config import setup_logging
-from cloudserve_support.pipeline.graph import escalation, handle
+from cloudserve_support.pipeline.graph import escalation, handle, warm_up
 
 setup_logging()
 log = logging.getLogger(__name__)
 
-app = FastAPI(title="CloudServe Support Triage", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Load the classifier, policy gate and retriever once at startup."""
+    try:
+        warm_up()
+    except Exception as exc:  # noqa: BLE001 - tickets will escalate with PIPELINE_ERROR
+        log.error("pipeline could not start (%s); tickets will be escalated", exc)
+    yield
+
+
+app = FastAPI(title="CloudServe Support Triage", version="0.2.0", lifespan=lifespan)
 
 
 @app.exception_handler(RequestValidationError)
@@ -43,11 +55,6 @@ async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
     log.exception("unhandled error on %s", request.url.path)
     result = escalation(None, ReasonCode.PIPELINE_ERROR, describe(exc))
     return JSONResponse(status_code=500, content=jsonable_encoder(result))
-
-
-@app.get("/")
-def root() -> dict[str, str]:
-    return {"message": "CloudServe Support Triage API is running."}
 
 
 @app.get("/health")

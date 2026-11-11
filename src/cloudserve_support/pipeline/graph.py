@@ -7,19 +7,31 @@ exactly one TicketResult and never raises.
     anything else                 -> escalation with PIPELINE_ERROR, full
                                      traceback in the log
 
-For now `process` is a placeholder that escalates every valid ticket. It is
-replaced by the LangGraph flow once classification (FR-03) onwards exist.
+`process` runs the pipeline for one valid ticket:
+
+    kill switch -> classify -> policy gate -> retrieve -> route
+
+Generation (FR-07) and pre-send validation (FR-08) are not built yet: a ticket
+routed to auto_respond is marked as such, with `response` left empty and a
+`detail` saying so. Escalations carry the classification, the reason and the
+retrieved sources; the written summary arrives with FR-09.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import time
 from datetime import datetime, timezone
 from typing import Any
 
 from cloudserve_support.app.schemas import NormalisedTicket, ReasonCode, TicketResult
 from cloudserve_support.errors import CloudServeError, describe, safe_ticket_id
+from cloudserve_support.pipeline.classify import get_classifier
 from cloudserve_support.pipeline.ingest import ingest
+from cloudserve_support.pipeline.policy import get_policy_gate
+from cloudserve_support.pipeline.retrieve import get_retriever
+from cloudserve_support.pipeline.route import decide
 
 log = logging.getLogger(__name__)
 
@@ -28,16 +40,65 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def kill_switch_on() -> bool:
+    return os.getenv("KILL_SWITCH", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def warm_up() -> None:
+    """Load the classifier, policy gate and retriever once, before the first ticket."""
+    get_classifier()
+    get_policy_gate()
+    get_retriever()
+
+
 def process(ticket: NormalisedTicket) -> TicketResult:
-    """Placeholder pipeline: escalate everything until FR-03 onwards exist."""
-    return TicketResult(
+    """Run the pipeline for one valid ticket."""
+    if kill_switch_on():
+        return escalation(
+            ticket.ticket_id, ReasonCode.KILL_SWITCH, "kill switch on", ticket.received_at,
+            reason_text="Kill switch is on: every ticket is sent to a human.",
+        )
+
+    c = get_classifier().classify(ticket.text)
+    policy = get_policy_gate().check(ticket.text, c.intent)
+    passages = get_retriever().search(ticket.text)  # always run, so escalations carry sources
+    decision = decide(c, policy, passages)
+
+    common: dict[str, Any] = dict(
         ticket_id=ticket.ticket_id,
-        route="escalate",
-        reason_code=ReasonCode.LOW_CONFIDENCE,
-        detail="pipeline not built yet",
+        route=decision.route,
+        reason_code=decision.reason_code,
+        reason_text=decision.reason_text,
+        intent=c.intent,
+        urgency=c.urgency,
+        intent_confidence=c.intent_confidence,
+        alternatives=[{"intent": i, "share": s} for i, s in c.alternatives],
+        doc_ids=[p.doc_id for p in passages],
+        retrieval_scores=[p.score for p in passages],
+        policy_rule=policy.rule,
+        sensitive=policy.sensitive,
         received_at=ticket.received_at,
         responded_at=_now(),
     )
+
+    if decision.route == "auto_respond":
+        return TicketResult(**common, detail="generation not built yet (FR-07)")
+
+    packet = {
+        "reason": decision.reason_text,
+        "intent": c.intent,
+        "intent_confidence": c.intent_confidence,
+        "alternatives": common["alternatives"],
+        "urgency": c.urgency,
+        "customer_tier": ticket.customer_tier,
+        "channel": ticket.channel,
+        "sources": [
+            {"doc_id": p.doc_id, "title": p.title, "section": p.section, "score": p.score} for p in passages
+        ],
+        "policy_checks": policy.checks,
+        "policy_version": policy.policy_version,
+    }
+    return TicketResult(**common, packet=packet)
 
 
 def escalation(
@@ -45,31 +106,46 @@ def escalation(
     reason: ReasonCode,
     detail: str,
     received_at: datetime | None = None,
+    reason_text: str | None = None,
 ) -> TicketResult:
     """An escalation that carries the reason it happened. Cannot fail on valid input types."""
     return TicketResult(
         ticket_id=ticket_id or "UNKNOWN",
         route="escalate",
         reason_code=reason,
+        reason_text=reason_text or _default_reason_text(reason),
         detail=detail,
         received_at=received_at,
         responded_at=_now(),
     )
 
 
+def _default_reason_text(reason: ReasonCode) -> str:
+    return {
+        ReasonCode.INVALID_INPUT: "Sent to a human: the ticket could not be read (missing or invalid fields).",
+        ReasonCode.MODEL_UNAVAILABLE: "Sent to a human: the language model was unavailable.",
+        ReasonCode.PIPELINE_ERROR: "Sent to a human: an internal error occurred while processing the ticket.",
+        ReasonCode.KILL_SWITCH: "Kill switch is on: every ticket is sent to a human.",
+    }.get(reason, "Sent to a human.")
+
+
 def handle(raw: Any) -> TicketResult:
     """Turn any raw input into exactly one result. Never raises."""
+    started = time.perf_counter()
     ticket_id = safe_ticket_id(raw)
     received_at: datetime | None = None
     try:
         ticket = ingest(raw)
         ticket_id, received_at = ticket.ticket_id, ticket.received_at
-        return process(ticket)
+        result = process(ticket)
 
     except CloudServeError as exc:
         log.warning("ticket %s escalated: %s (%s)", exc.ticket_id or ticket_id, exc.reason_code.value, exc.detail)
-        return escalation(exc.ticket_id or ticket_id, exc.reason_code, exc.detail, received_at)
+        result = escalation(exc.ticket_id or ticket_id, exc.reason_code, exc.detail, received_at)
 
     except Exception as exc:  # noqa: BLE001 - this is the error boundary
         log.exception("unexpected error for ticket %s", ticket_id)
-        return escalation(ticket_id, ReasonCode.PIPELINE_ERROR, describe(exc), received_at)
+        result = escalation(ticket_id, ReasonCode.PIPELINE_ERROR, describe(exc), received_at)
+
+    result.latency_ms = round((time.perf_counter() - started) * 1000, 1)
+    return result

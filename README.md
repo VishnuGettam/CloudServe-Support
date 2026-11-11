@@ -2,7 +2,7 @@
 
 An AI-assisted support system for **CloudServe Solutions**, a cloud infrastructure company whose support team is missing its response-time SLA. The system reads each incoming ticket, answers it automatically when it can do so safely and with cited sources, and otherwise hands it to a human with a complete summary attached.
 
-> **Project status (11 November 2026):** ticket intake (FR-01), the batch harness (FR-02) and hybrid retrieval (FR-05) are built and tested; all 80 validation tickets run end to end. Classification, the policy gate, routing, generation and validation are specified and being built next. See [Build status](#build-status).
+> **Project status (11 November 2026):** intake (FR-01), the batch harness (FR-02), classification (FR-03), the policy gate (FR-04), hybrid retrieval (FR-05), routing (FR-06) and the kill switch (part of FR-11) are built and tested. All 80 validation tickets run through the real pipeline with zero must-never-automate tickets answered. Generation (FR-07) is next: until then, tickets routed to an automatic answer have no reply text. See [Build status](#build-status).
 
 ---
 
@@ -121,14 +121,17 @@ flowchart LR
 
 | Decision | Reason |
 |---|---|
-| **Safety rules are code, not prompts.** Six of the twelve requirements use no language model at all. | A rule such as "never auto-answer a security incident" must not depend on a model following instructions. |
-| **Every decision is deterministic.** The same ticket always gets the same route (acceptance criterion A5). Confidence will come from a measurable signal, not the model rating itself. | Models are poor at rating their own certainty, the brief requires confidence calibrated within 5 points, and the Build Specification checks that a repeated ticket gets the same decision. |
+| **Safety rules are code, not prompts.** The policy gate, routing and kill switch use no language model at all. | A rule such as "never auto-answer a security incident" must not depend on a model following instructions. |
+| **Every decision is deterministic.** The same ticket always gets the same route (acceptance criterion A5). | The Build Specification checks that a repeated ticket gets the same decision. Classification, the policy gate, retrieval and routing contain no randomness. |
+| **Classification by nearest-neighbour vote, not a language model.** The 15 most similar labelled development tickets vote on intent and urgency; the winning share is turned into a calibrated confidence. | Deterministic, needs no model calls (the free tier allows 50 a day), and the confidence is measured: when it says 0.98 it is right about 97% of the time. Held-out intent accuracy 94.8%. |
+| **Honest evaluation: duplicate tickets never cross between training and testing.** | Only 216 of the 500 development ticket texts are unique. A first version scored 99.8% because duplicates leaked into the test folds; grouping by text gave the honest 94.8%. |
 | **Hybrid retrieval** (meaning-based plus keyword search). | Keyword search fails on "my deployment keeps dying" vs "container health check failures", the documentation owner's main complaint. Meaning-based search alone misses exact error codes. Measured: hybrid recall@5 98.9% vs 96.9% keyword-only. |
 | **Embeddings run on ONNX Runtime, not PyTorch.** | Same `all-MiniLM-L6-v2` model, about 2 GB smaller to install, and not blocked by Windows Application Control, which blocked PyTorch's DLLs on the development machine. |
 | **Retrieval degrades instead of failing.** | If the embedding model can't load, search falls back to keyword-only (recall@5 still 96.9%) and logs a warning, rather than stopping (A11). |
 | **Answers only from the 29 reviewed articles.** Never from agents' private answer files or past replies. | Tier 2 reports that private snippets contain answers that have been wrong for two years. |
 | **Two front doors, one pipeline.** The API and the harness both call the same `handle()` function. | Live and batch tickets can never behave differently. |
-| **Thresholds are chosen from data, not judgement.** | `eval/retrieval_check.py` set the retrieval threshold at 0.30 (keeps 95.5% of correct articles). A sweep will set the classifier threshold the same way, keeping wrong automatic answers at 5% or below of automatic replies. |
+| **Thresholds are chosen from data, not judgement.** | `eval/retrieval_check.py` set the retrieval threshold at 0.30 (keeps 95.5% of correct articles). `eval/threshold_sweep.py` set the confidence threshold at 0.80: the lowest value where 99% of automatic answers have the right intent. |
+| **Keyword safety net in configuration, not code.** | `config/never_auto.yaml` holds the blocked intents and keyword lists, with a version number recorded in every decision. Changing a rule is a reviewable commit. |
 | **The retrieval score is a relevance filter, not an answerability signal.** | Tickets the docs *can't* answer score almost as high as ones they can (median 0.58 vs 0.59), because they use the same vocabulary. Whether a ticket is answerable is decided by the policy gate, classifier confidence and the generator's "not answerable" check. |
 
 ---
@@ -138,14 +141,15 @@ flowchart LR
 | Step | What happens | Requirement | Status |
 |---|---|---|---|
 | **1. Ingest** | Validates the ticket against the schema. Email: removes quoted replies and signatures. Tidies whitespace. Replaces the customer's name with `[CUSTOMER]`, so no name reaches an external model. Joins subject and body into one text. Fingerprints the original ticket for the log. | FR-01 | **Built** |
-| **2. Classify** | Predicts intent (one of 22) and urgency with a confidence between 0 and 1, and records the runner-up intent it considered. Deterministic, so a repeated ticket gets the same answer. Non-fluent tickets are first restated in plain English. | FR-03 | Next |
-| **3. Policy gate** | Pure code. Blocks the four never-automate intents, any ticket matching the keyword safety net in `config/never_auto.yaml` (catches 94% of these tickets on development data even if the classifier is wrong), and short tickets that name no product or error. | FR-04 | Specified |
+| **2. Classify** | Compares the ticket with the 500 labelled development tickets (TF-IDF similarity); the 15 nearest vote on intent (one of 22) and urgency. The vote share becomes a calibrated confidence (isotonic regression fitted by cross-validation). Records the top three intents considered. Empty or unmatched text gets a defined fallback (`unclear_request`, confidence 0), never an exception. | FR-03 | **Built** |
+| **3. Policy gate** | Pure code, three rules: (1) the four never-automate intents; (2) a keyword safety net in `config/never_auto.yaml`, independent of the classifier; (3) tickets of 20 words or fewer that name no product or error. Also flags data residency and billing disputes for a stricter threshold. Records every check and a plain-language reason. Keywords and the unclear rule alone catch 87 of 87 must-never-automate development tickets and 14 of 14 validation tickets. | FR-04 | **Built** |
 | **4. Retrieve** | Searches the 29 help articles, split at their headings into 116 sections (Symptoms, Common causes, Resolution, Notes), so resolution steps are never split. Combines MiniLM embeddings in Chroma with BM25 keyword search by reciprocal rank fusion. Returns up to 5 passages, one per article, each with an ID that resolves to the corpus. Passages below the relevance threshold (0.30) are dropped, and an empty list is a valid result. | FR-05 | **Built** |
-| **5. Route** | Answers automatically only if not blocked, intent confidence ≥ τc and a relevant passage was found. A stricter τc applies to data residency and billing disputes. Assigns exactly one reason code, plus a plain-language reason a support manager can read. | FR-06 | Specified |
+| **5. Route** | Fixed order of checks: policy gate → relevant passage found → sensitive threshold (0.90) → general threshold (0.80). The first that fails gives the reason code; otherwise `AUTO_RESPONDED`. Every result carries a plain-language reason a support manager can read, naming the runner-up intent when confidence is low. | FR-06 | **Built** |
 | **6. Generate** | Writes an answer using only the retrieved passages, as JSON with each claim tied to an article ID. Returns "not answerable" rather than guessing. The AI-drafted label is added by code. | FR-07 | Specified |
 | **7. Validate** | Five checks before sending: no private data; citations only from retrieved articles; no promises of refunds, fixes or dates, and no requests for credentials; no advice for a plan the customer isn't on; tone and length per channel. A separate claim-checker model confirms each claim is supported. Any failure escalates. | FR-08 | Specified |
 | **8. Escalate** | Builds the escalation packet and places it in the human queue by urgency, tier and age. | FR-09 | Specified |
-| **Always** | Logs every decision; escalates instead of failing if the model is unavailable; one switch sends every ticket to a human. | FR-10, FR-11 | Specified |
+| **Always** | Kill switch: `KILL_SWITCH=true` sends every ticket to a human. | FR-11 | **Built** |
+| **Always** | Logs every decision; escalates instead of failing if the model is unavailable. | FR-10, FR-11 | Specified |
 
 ---
 
@@ -155,14 +159,16 @@ All free and open source, as the brief requires.
 
 | Purpose | Technology |
 |---|---|
-| Language and packaging | Python 3.11, managed with [uv](https://docs.astral.sh/uv/) |
+| Language and packaging | Python 3.14 (tested on 3.14.8), managed with [uv](https://docs.astral.sh/uv/) |
 | Data validation | Pydantic v2 |
 | API | FastAPI, served by Uvicorn |
 | Orchestration | LangGraph (on LangChain) |
-| Language model | Groq, `llama-3.3-70b-versatile` (classification, generation); `llama-3.1-8b-instant` (claim checking). Configurable. |
+| Classification | Nearest-neighbour vote over TF-IDF similarity, with isotonic calibration (scikit-learn) |
+| Language model | OpenRouter free models, for generation and claim checking *(from FR-07)*. Configurable. |
 | Embeddings | `all-MiniLM-L6-v2`, run with ONNX Runtime (Chroma's built-in model) |
 | Vector store | Chroma |
 | Keyword search | BM25 (`rank-bm25`) |
+| Policy configuration | YAML (`pyyaml`) |
 | Decision log | SQLAlchemy: SQLite by default, PostgreSQL by changing `DATABASE_URL` |
 | Monitoring | Prometheus and Grafana |
 | Testing and CI | pytest, httpx; GitHub Actions |
@@ -179,8 +185,11 @@ CloudServe-Support/
 │   │   └── schemas.py         TicketIn, NormalisedTicket, TicketResult, ReasonCode
 │   ├── pipeline/
 │   │   ├── ingest.py          validation, email cleaning, name masking
+│   │   ├── classify.py        nearest-neighbour intent and urgency, calibrated confidence
+│   │   ├── policy.py          policy gate: blocked intents, keyword net, unclear rule
 │   │   ├── retrieve.py        hybrid retrieval over the 29 articles
-│   │   └── graph.py           handle(): the per-ticket error boundary and pipeline
+│   │   ├── route.py           routing decision and plain-language reason
+│   │   └── graph.py           handle() and process(): error boundary, kill switch, pipeline
 │   ├── harness/
 │   │   └── __main__.py        batch runner: --input / --output / --resume / --limit
 │   ├── errors.py              error classes, each mapped to a reason code
@@ -189,19 +198,27 @@ CloudServe-Support/
 │   ├── test_ingest.py         FR-01
 │   ├── test_harness.py        FR-02 and the API
 │   ├── test_errors.py         error boundary and API error handling
-│   └── test_retrieve.py       FR-05
+│   ├── test_classify.py       FR-03
+│   ├── test_policy.py         FR-04
+│   ├── test_retrieve.py       FR-05
+│   └── test_route.py          FR-06, kill switch, end-to-end determinism
 ├── eval/
-│   └── retrieval_check.py     measures retrieval recall and sets the relevance threshold
+│   ├── retrieval_check.py     measures retrieval recall and sets the relevance threshold
+│   └── threshold_sweep.py     sets the routing confidence thresholds
+├── config/
+│   └── never_auto.yaml        policy gate rules (versioned)
 ├── data/                      development, validation and documentation JSON
 ├── docs/
 │   └── architecture_diagram.excalidraw
 ├── prompts/                   versioned prompt files (PR-01 to PR-04)
+├── .env.example               configuration template (no secrets)
+├── .python-version
 ├── pyproject.toml
 ├── uv.lock
 └── README.md
 ```
 
-Planned additions as the build continues: `pipeline/classify.py`, `policy.py`, `route.py`, `generate.py`, `validate.py`; `store/` (decision log); metrics report and fairness audit in `eval/`; `config/never_auto.yaml`; `.env.example`; `.github/workflows/ci.yml`.
+Planned additions as the build continues: `pipeline/generate.py`, `validate.py`, `escalate.py`; a model client with response cache; `store/` (decision log); metrics report and fairness audit in `eval/`; `.github/workflows/ci.yml`.
 
 ---
 
@@ -209,9 +226,9 @@ Planned additions as the build continues: `pipeline/classify.py`, `policy.py`, `
 
 ### Prerequisites
 
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) (installs Python 3.11 automatically if needed)
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) (installs the Python version in `.python-version`, 3.14, automatically if needed)
 - Internet access on first run: the embedding model (about 80 MB) downloads once and is cached in `~/.cache/chroma`
-- A free model-provider API key, once classification is added
+- A free OpenRouter API key, once generation (FR-07) is added. Classification needs no key.
 
 ### Install
 
@@ -219,7 +236,10 @@ Planned additions as the build continues: `pipeline/classify.py`, `policy.py`, `
 git clone <repository-url>
 cd CloudServe-Support
 uv sync
+cp .env.example .env      # then put your own key in .env
 ```
+
+Run every command from the project folder. Running pytest from a parent folder makes it search the whole drive.
 
 `uv sync` reads `uv.lock` and recreates the exact environment, including the project package itself.
 
@@ -240,10 +260,14 @@ Settings are read from environment variables, or from a `.env` file that is neve
 | `DOCS_PATH` | Help articles file | `data/documentation.json` |
 | `RETRIEVAL_TOP_K` | Maximum passages returned per ticket | `5` |
 | `RETRIEVAL_MIN_SCORE` | Relevance threshold; passages below it are dropped | `0.30` |
-| `GROQ_API_KEY` | Model provider key *(needed from FR-03)* | none |
-| `LLM_MODEL` | Model for classification and generation *(from FR-03)* | `llama-3.3-70b-versatile` |
+| `TRAIN_PATH` | Labelled tickets the classifier votes over | `data/development_tickets.json` |
+| `CLASSIFIER_EMBEDDINGS` | `true` adds MiniLM similarity to the classifier's TF-IDF | `false` |
+| `POLICY_CONFIG` | Policy gate rules | `config/never_auto.yaml` |
+| `CONFIDENCE_THRESHOLD` | Minimum intent confidence for an automatic answer | `0.80` |
+| `CONFIDENCE_THRESHOLD_SENSITIVE` | Same, for data residency and billing disputes | `0.90` |
+| `OPENROUTER_API_KEY` | Model provider key *(needed from FR-07)* | none |
 | `DATABASE_URL` | Decision log database *(from FR-10)* | `sqlite:///./storage/decisions.db` |
-| `KILL_SWITCH` | `true` sends every ticket to a human *(from FR-11)* | `false` |
+| `KILL_SWITCH` | `true` sends every ticket to a human | `false` |
 
 ---
 
@@ -322,6 +346,38 @@ Results on the 357 answerable development tickets:
 | 0.35 | 94.1% | 86.7% |
 | 0.40 | 92.4% | 85.3% |
 
+### Threshold sweep
+
+Sets the routing confidence thresholds. Each development ticket is classified by a model that has never seen its text, then put through the real policy gate and retrieval.
+
+```bash
+uv run python eval/threshold_sweep.py --tickets data/development_tickets.json
+```
+
+| Threshold | Answered automatically | Right intent among those | Must-never-automate answered |
+|---|---|---|---|
+| 0.70 | 75.4% | 98.0% | 0 |
+| **0.80 (chosen)** | **71.6%** | **99.7%** | **0** |
+| 0.90 | 65.3% | 99.7% | 0 |
+
+Rule: the lowest threshold where at least 99% of automatic answers have the right intent, since a wrong intent means a wrong article and a wrong answer. The sensitive threshold (0.90) is a policy choice: 36 development examples are too few to fit it separately.
+
+### Validation run (80 tickets)
+
+| Measure | Result |
+|---|---|
+| Tickets processed | 80 of 80, no errors |
+| Must-never-automate tickets answered automatically | **0 of 14** |
+| Routed automatically / escalated | 62 / 18 |
+| Correct article ranked first (automatic tickets with an expected article) | 43 of 45 |
+| Processing time per ticket (no model call yet) | median 34 ms, p95 38 ms |
+| Agreement with the client's route labels | 72.5% |
+| Urgency agreement with labels | 41% (labels are inconsistent; no target set) |
+
+Intent accuracy on validation is 100%, but validation tickets reuse development message templates; the honest estimate is **94.8%**, from development tickets held out by text.
+
+Of the 62 automatic routes, 18 are labelled "escalate" by the client, 17 of them because the docs are marked as not answering the question. That label can't be predicted from the text (identical texts carry different labels; best possible agreement by text is about 86%), so answerability is left to the generator's "not answerable" check in FR-07.
+
 ### Output format
 
 One `TicketResult` per ticket:
@@ -331,15 +387,19 @@ One `TicketResult` per ticket:
 | `ticket_id` | From the input; `UNKNOWN` if the input had none |
 | `route` | `auto_respond` or `escalate` |
 | `reason_code` | Why (see [Reason codes](#reason-codes)) |
+| `reason_text` | The reason in plain language, for a support manager |
 | `intent`, `urgency`, `intent_confidence` | Classifier output |
-| `doc_ids` | Help articles used |
+| `alternatives` | The top intents considered, with vote shares |
+| `doc_ids`, `retrieval_scores` | Help articles retrieved, with similarity scores |
+| `policy_rule`, `sensitive` | Which policy rule blocked the ticket, or which sensitive class it belongs to |
 | `response` | The automatic reply, if any |
 | `packet` | The escalation packet, if escalated |
 | `failed_check` | Which validation check failed, if any |
 | `detail` | Short technical explanation, never ticket text |
-| `received_at`, `responded_at` | For measuring time to first reply |
+| `received_at`, `responded_at` | When the ticket was sent, and when the system answered |
+| `latency_ms` | The system's processing time; used for time to first reply, because replayed historical tickets make `responded_at − received_at` meaningless |
 
-> Until classification is built, the placeholder pipeline escalates every valid ticket with `LOW_CONFIDENCE`. Results from these runs are not meaningful and should not be reported.
+> Until generation (FR-07) is built, tickets routed to `auto_respond` have an empty `response` and `detail: "generation not built yet (FR-07)"`.
 
 ---
 
@@ -352,9 +412,9 @@ Every ticket gets exactly one. The same codes are used in results, escalation pa
 | `AUTO_RESPONDED` | Answered automatically; every condition and check passed |
 | `POLICY_BLOCKED` | Intent is one of the four never-automate intents |
 | `KEYWORD_BLOCKED` | The keyword safety net matched, whatever the classification |
-| `LOW_CONFIDENCE` | Intent confidence below τc |
-| `WEAK_RETRIEVAL` | No article scored above τr, or the generator found the articles don't answer the question |
-| `SENSITIVE_CLASS` | Data residency or billing dispute below the stricter threshold |
+| `LOW_CONFIDENCE` | Intent confidence below the threshold (0.80) |
+| `WEAK_RETRIEVAL` | No article passed the relevance threshold, or the generator found the articles don't answer the question |
+| `SENSITIVE_CLASS` | Data residency or billing dispute below the stricter threshold (0.90) |
 | `VALIDATION_FAILED` | The draft failed a pre-send check (named in `failed_check`) |
 | `MODEL_UNAVAILABLE` | Model call timed out or failed after retries |
 | `KILL_SWITCH` | Kill switch on; every ticket goes to a human |
@@ -413,13 +473,16 @@ Errors are handled at three levels, so the system always returns a result and ne
 uv run pytest -v
 ```
 
-**48 tests, all passing.** Test names include the test case IDs from the traceability table (for example `test_tc_02_03_bad_tickets_do_not_stop_run`).
+**74 tests, all passing.** Test names include the test case IDs from the traceability table (for example `test_tc_02_03_bad_tickets_do_not_stop_run`).
 
 | File | Covers |
 |---|---|
 | `test_ingest.py` | TC-01-01 to TC-01-04: every channel converts; empty chat subject; malformed tickets rejected; names masked; email cleaning; all 500 development tickets convert |
 | `test_harness.py` | TC-02-01 to TC-02-04: 500 in, 500 out; temporary paths through the real command line; bad and crashing tickets don't stop the run; resume after interruption. TC-01-05: the API returns a decision. Plus run-level errors and exit codes. |
 | `test_errors.py` | Error boundary: unexpected errors become `PIPELINE_ERROR`; known errors keep their code; numeric ticket IDs; error details never contain ticket text; API handling of invalid JSON, empty bodies and server errors |
+| `test_classify.py` | TC-03-01 to TC-03-04: intent, urgency and confidence returned with alternatives; deterministic; defined fallback for empty or unmatched text; held-out accuracy ≥ 85% with duplicate texts kept out of training |
+| `test_policy.py` | TC-04-01 to TC-04-04: no must-never-automate ticket passes; keyword and unclear rules alone catch ≥ 90% with no classifier; a security ticket misclassified as an API key issue is still caught; vague tickets blocked. Plus sensitive-class flags, plain-language reasons and invalid configuration |
+| `test_route.py` | TC-06-03: every routing branch gives one reason code and a readable reason; thresholds read from configuration; same ticket twice gives the same decision (A5); security ticket escalates end to end; TC-11-02 kill switch |
 | `test_retrieve.py` | TC-05-01 to TC-05-03: keyword recall@5 ≥ 90% on development tickets; index holds only the 29 articles; resolution steps never split. Plus: passages resolve to the corpus (A4); one passage per article; deterministic results; irrelevant and empty queries return nothing; fallback to keyword search when the model can't load (A11). Uses a small offline embedder so tests need no network. |
 
 ---
@@ -430,15 +493,15 @@ uv run pytest -v
 |---|---|---|
 | FR-01 | Accept tickets from all four channels; one internal format | ✅ Built, tested |
 | FR-02 | Unattended batch harness with input and output paths | ✅ Built, tested; 80/80 validation tickets processed |
-| FR-03 | Intent and urgency with calibrated confidence | Next |
-| FR-04 | Policy gate for never-automate tickets | Specified |
+| FR-03 | Intent and urgency with calibrated confidence | ✅ Built, tested; held-out intent accuracy 94.8% |
+| FR-04 | Policy gate for never-automate tickets | ✅ Built, tested; 0 of 14 validation tickets got through |
 | FR-05 | Hybrid retrieval over the 29 articles | ✅ Built, tested; recall@5 98.9% |
-| FR-06 | Routing with data-driven thresholds | Specified |
-| FR-07 | Grounded, cited, AI-labelled answers | Specified |
+| FR-06 | Routing with data-driven thresholds | ✅ Built, tested; threshold 0.80 from sweep |
+| FR-07 | Grounded, cited, AI-labelled answers | Next |
 | FR-08 | Pre-send validation checks | Specified |
 | FR-09 | Escalation packet and priority queue | Specified |
 | FR-10 | Decision log | Specified |
-| FR-11 | Fail-safe and kill switch | Specified |
+| FR-11 | Fail-safe and kill switch | Kill switch ✅ built; model fail-safe with FR-07 |
 | FR-12 | No private answer files as a source *(Will not)* | Enforced by design |
 
 ---
@@ -451,15 +514,15 @@ Every component traces back to a requirement, and every requirement traces back 
 |---|---|---|---|
 | FR-01 | `pipeline/ingest.py`, `app/main.py`, `app/schemas.py` | none | TC-01-01 to TC-01-05 |
 | FR-02 | `harness/__main__.py`, `pipeline/graph.py` | none | TC-02-01 to TC-02-04 |
-| FR-03 | `pipeline/classify.py` *(planned)* | PR-01 | TC-03-01 to TC-03-04 |
-| FR-04 | `pipeline/policy.py` *(planned)* | PR-01 (unclear only) | TC-04-01 to TC-04-04 |
+| FR-03 | `pipeline/classify.py` | none (PR-01 replaced; see revision 7) | TC-03-01 to TC-03-04 |
+| FR-04 | `pipeline/policy.py`, `config/never_auto.yaml` | none | TC-04-01 to TC-04-04 |
 | FR-05 | `pipeline/retrieve.py` | none | TC-05-01 to TC-05-03 |
-| FR-06 | `pipeline/route.py` *(planned)* | none | TC-06-01 to TC-06-04 |
+| FR-06 | `pipeline/route.py`, `eval/threshold_sweep.py` | none | TC-06-01 to TC-06-04 |
 | FR-07 | `pipeline/generate.py` *(planned)* | PR-02; evaluated by PR-05, PR-06 | TC-07-01 to TC-07-04 |
 | FR-08 | `pipeline/validate.py` *(planned)* | PR-04; evaluated by PR-05 | TC-08-01 to TC-08-06 |
 | FR-09 | `pipeline/escalate.py` *(planned)* | PR-03 | TC-09-01 to TC-09-04 |
 | FR-10 | `store/decision_log.py` *(planned)* | none | TC-10-01 to TC-10-04 |
-| FR-11 | `pipeline/graph.py`, model wrapper *(planned)* | none | TC-11-01, TC-11-02 |
+| FR-11 | `pipeline/graph.py` (kill switch); model wrapper *(planned)* | none | TC-11-01, TC-11-02 |
 
 ### Targets
 
@@ -477,11 +540,16 @@ Every component traces back to a requirement, and every requirement traces back 
 
 ## Known limitations
 
-- **Intake, harness and retrieval are built; retrieval is not yet wired into the pipeline.** Until classification exists, every ticket is escalated with `LOW_CONFIDENCE` as a placeholder, and those results must not be reported.
+- **Generation is not built yet.** Tickets routed to an automatic answer have no reply text, and latency figures exclude the model call.
+- **About a quarter of automatic routes disagree with the client's labels,** almost all because the docs are labelled as not answering the question. Text can't predict that label; the generator's "not answerable" check must catch these.
+- **Validation intent accuracy (100%) overstates real accuracy,** because validation reuses development message templates. 94.8% (held out by text) is the honest figure.
+- **The keyword lists were tuned on development tickets.** Four missed tickets led to new patterns; validation was used only to confirm (14 of 14 caught).
+- **Exposed-key tickets are escalated on purpose** (DOC-SEC-002 treats an exposed credential as a security event), at the cost of 4 validation tickets the labels say could be answered.
 - **The retrieval score can't tell answerable from unanswerable tickets** (median 0.59 vs 0.58), so it is used only to drop irrelevant passages.
 - **Masking and email cleaning are tested only on made-up examples.** None of the 500 development tickets contains a customer name or a quoted email thread.
 - **Routing accuracy has a ceiling below 100%.** 35 of 78 repeated ticket texts carry different routing labels in the data.
-- **Urgency labels are inconsistent** (67 of 78 repeated texts disagree), so no urgency accuracy target is set.
+- **Urgency labels are inconsistent** (67 of 78 repeated texts disagree), so no urgency accuracy target is set. Measured agreement on validation is 41%, which matters because urgency orders the human queue.
+- **Non-fluent tickets are not yet restated in plain English** before classification; fairness by fluency will be measured in the audit.
 - **Article freshness can't be checked:** every article shows `last_reviewed_days_ago = 0`.
 - **Reference answers are weak for 40% of tickets:** 79 of 200 are one generic paragraph, so they are excluded when scoring answer quality.
 - **The human queue is a sorted list in the output,** not an agent interface.
@@ -496,7 +564,11 @@ Every component traces back to a requirement, and every requirement traces back 
 | 4 | Embeddings run on ONNX Runtime instead of sentence-transformers | Windows Application Control blocked PyTorch; same model, much smaller install |
 | 5 | Retrieval falls back to keyword-only search if the embedding model can't load | Degrade rather than stop (A11) |
 | 6 | Retrieval score is a relevance filter only; answerability decided by policy gate, confidence and the generator | Measured: unanswerable tickets score almost as high as answerable ones |
-| 7 | Classifier must be deterministic; three samples at temperature 0.5 replaced | Build Specification A5: the same ticket must always get the same decision |
+| 7 | Classifier replaced: nearest-neighbour vote over labelled tickets instead of three samples of PR-01 at temperature 0.5 | Build Specification A5 requires the same decision every time; the free tier allows only 50 model calls a day; confidence is now measured, not self-rated |
+| 8 | The confidence threshold controls intent accuracy; answerability is decided by the generator | Raising the threshold did not reduce disagreement with the "not answerable" labels (about 26% at every setting) |
+| 9 | Exposed-key tickets escalated deliberately by the keyword net | DOC-SEC-002 treats an exposed credential as a security event; costs 4 validation tickets |
+| 10 | No urgency accuracy target; urgency measured at 41% on validation | Urgency labels are inconsistent for identical texts |
+| 11 | Model provider changed from Groq to OpenRouter free models | One key reaches several free models, so the client can fall back when one is busy; matches the course's `.env.example` |
 
 ---
 

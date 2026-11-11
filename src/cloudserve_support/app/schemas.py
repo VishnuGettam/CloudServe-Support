@@ -32,7 +32,7 @@ class ReasonCode(str, Enum):
     MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
     KILL_SWITCH = "KILL_SWITCH"
     INVALID_INPUT = "INVALID_INPUT"  # added in Stage 3; revision log entry 1
-    PIPELINE_ERROR = "PIPELINE_ERROR"  # revision log entry 2
+    PIPELINE_ERROR = "PIPELINE_ERROR"  # added in build; revision log entry 2
 
 
 class TicketIn(BaseModel):
@@ -87,13 +87,19 @@ class TicketResult(BaseModel):
     ticket_id: str
     route: Route
     reason_code: ReasonCode
+    reason_text: str | None = None  # plain language, for a support manager
     intent: str | None = None
     urgency: str | None = None
     intent_confidence: float | None = None
+    alternatives: list[dict[str, Any]] = Field(default_factory=list)  # intents considered, with vote shares
     doc_ids: list[str] = Field(default_factory=list)
+    retrieval_scores: list[float] = Field(default_factory=list)
+    policy_rule: str | None = None
+    sensitive: str | None = None
     response: str | None = None
     packet: dict[str, Any] | None = None
     failed_check: str | None = None
     detail: str | None = None
     received_at: datetime | None = None
     responded_at: datetime
+    latency_ms: float | None = None  # system processing time; used for time to first reply

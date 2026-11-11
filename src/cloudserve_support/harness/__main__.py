@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from cloudserve_support.logging_config import setup_logging
-from cloudserve_support.pipeline.graph import handle
+from cloudserve_support.pipeline.graph import handle, warm_up
 
 log = logging.getLogger("cloudserve_support.harness")
 
@@ -158,6 +158,11 @@ def run(input_path: Path, output_path: Path, resume: bool = False, limit: int | 
 
     if done:
         log.info("resuming: %d of %d tickets already processed", len(done), count)
+
+    try:
+        warm_up()  # load models once, so the first ticket's latency is not inflated
+    except Exception as exc:  # noqa: BLE001 - each ticket will then escalate with PIPELINE_ERROR
+        log.error("pipeline could not start (%s); tickets will be escalated", exc)
 
     started = time.perf_counter()
     try:
