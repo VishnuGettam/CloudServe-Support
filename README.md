@@ -2,7 +2,7 @@
 
 An AI-assisted support system for **CloudServe Solutions**, a cloud infrastructure company whose support team is missing its response-time SLA. The system reads each incoming ticket, answers it automatically when it can do so safely and with cited sources, and otherwise hands it to a human with a complete summary attached.
 
-> **Project status (7 November 2026):** ticket intake (FR-01) and the batch harness (FR-02) are built and tested. Classification, retrieval, routing, generation and validation are designed and specified, and are being built next. See [Build status](#build-status).
+> **Project status (11 November 2026):** ticket intake (FR-01), the batch harness (FR-02) and hybrid retrieval (FR-05) are built and tested; all 80 validation tickets run end to end. Classification, the policy gate, routing, generation and validation are specified and being built next. See [Build status](#build-status).
 
 ---
 
@@ -82,9 +82,9 @@ flowchart LR
 
     ING["Ingest<br/>validate · clean · mask name<br/><i>FR-01</i>"]
     GATE["Policy gate<br/>blocked intents + keywords<br/><i>FR-04</i>"]
-    CLS["Classify ×3<br/>intent · urgency · confidence<br/><i>FR-03</i>"]
-    RET["Retrieve<br/>hybrid search, top 5<br/><i>FR-05</i>"]
-    ROUTE{"Route<br/>τc · τr thresholds<br/><i>FR-06</i>"}
+    CLS["Classify<br/>intent · urgency · confidence<br/><i>FR-03</i>"]
+    RET["Retrieve<br/>hybrid search, top 5<br/>relevance threshold<br/><i>FR-05</i>"]
+    ROUTE{"Route<br/>deterministic thresholds<br/><i>FR-06</i>"}
     GEN["Generate<br/>cited answer<br/><i>FR-07</i>"]
     VAL{"Validate<br/>5 checks<br/><i>FR-08</i>"}
     AUTO(["Automatic reply<br/>AI-labelled, cited"])
@@ -102,8 +102,8 @@ flowchart LR
     VAL -->|fail| ESC
 
     subgraph SHARED["Shared services"]
-        LOG[("PostgreSQL<br/>decision log<br/><i>FR-10</i>")]
-        KB[("Chroma<br/>29 help articles only<br/><i>FR-05, FR-12</i>")]
+        LOG[("Decision log<br/>SQLAlchemy<br/><i>FR-10</i>")]
+        KB[("Chroma + BM25<br/>29 help articles only<br/><i>FR-05, FR-12</i>")]
         KILL["Kill switch + fail-safe<br/><i>FR-11</i>"]
         MON["Prometheus + Grafana"]
     end
@@ -115,18 +115,21 @@ flowchart LR
 |---|---|---|
 | **Application** | FastAPI endpoint, batch harness, LangGraph orchestration, guardrails, response formatting | Owns the decision flow and every safety rule |
 | **Model and retrieval** | Classifier, embedding model, Chroma vector store, answer generator, claim checker | Can be swapped (another model or vector store) through configuration, without touching the application layer |
-| **Persistence and observability** | PostgreSQL decision log, Prometheus metrics, Grafana dashboards, GitHub Actions CI | Every decision is reconstructable and every run is measurable |
+| **Persistence and observability** | Decision log (SQLAlchemy), Prometheus metrics, Grafana dashboards, GitHub Actions CI | Every decision is reconstructable and every run is measurable |
 
 ### Key design decisions
 
 | Decision | Reason |
 |---|---|
 | **Safety rules are code, not prompts.** Six of the twelve requirements use no language model at all. | A rule such as "never auto-answer a security incident" must not depend on a model following instructions. |
-| **Confidence comes from agreement, not self-rating.** The classifier runs three times; confidence is the share of runs that agree. | Models are poor at rating their own certainty, and the brief requires confidence calibrated within 5 points. |
-| **Hybrid retrieval** (meaning-based plus keyword search). | Keyword search fails on "my deployment keeps dying" vs "container health check failures", the documentation owner's main complaint. Meaning-based search alone misses exact error codes. |
+| **Every decision is deterministic.** The same ticket always gets the same route (acceptance criterion A5). Confidence will come from a measurable signal, not the model rating itself. | Models are poor at rating their own certainty, the brief requires confidence calibrated within 5 points, and the Build Specification checks that a repeated ticket gets the same decision. |
+| **Hybrid retrieval** (meaning-based plus keyword search). | Keyword search fails on "my deployment keeps dying" vs "container health check failures", the documentation owner's main complaint. Meaning-based search alone misses exact error codes. Measured: hybrid recall@5 98.9% vs 96.9% keyword-only. |
+| **Embeddings run on ONNX Runtime, not PyTorch.** | Same `all-MiniLM-L6-v2` model, about 2 GB smaller to install, and not blocked by Windows Application Control, which blocked PyTorch's DLLs on the development machine. |
+| **Retrieval degrades instead of failing.** | If the embedding model can't load, search falls back to keyword-only (recall@5 still 96.9%) and logs a warning, rather than stopping (A11). |
 | **Answers only from the 29 reviewed articles.** Never from agents' private answer files or past replies. | Tier 2 reports that private snippets contain answers that have been wrong for two years. |
 | **Two front doors, one pipeline.** The API and the harness both call the same `handle()` function. | Live and batch tickets can never behave differently. |
-| **Thresholds are chosen from data, not judgement.** | A sweep on development tickets sets τc and τr, keeping wrong automatic answers at 5% or below of automatic replies. |
+| **Thresholds are chosen from data, not judgement.** | `eval/retrieval_check.py` set the retrieval threshold at 0.30 (keeps 95.5% of correct articles). A sweep will set the classifier threshold the same way, keeping wrong automatic answers at 5% or below of automatic replies. |
+| **The retrieval score is a relevance filter, not an answerability signal.** | Tickets the docs *can't* answer score almost as high as ones they can (median 0.58 vs 0.59), because they use the same vocabulary. Whether a ticket is answerable is decided by the policy gate, classifier confidence and the generator's "not answerable" check. |
 
 ---
 
@@ -135,10 +138,10 @@ flowchart LR
 | Step | What happens | Requirement | Status |
 |---|---|---|---|
 | **1. Ingest** | Validates the ticket against the schema. Email: removes quoted replies and signatures. Tidies whitespace. Replaces the customer's name with `[CUSTOMER]`, so no name reaches an external model. Joins subject and body into one text. Fingerprints the original ticket for the log. | FR-01 | **Built** |
-| **2. Classify** | Runs the classifier prompt three times. Majority vote gives intent (one of 22) and urgency; agreement gives confidence. Non-fluent tickets are first restated in plain English. | FR-03 | Specified |
+| **2. Classify** | Predicts intent (one of 22) and urgency with a confidence between 0 and 1, and records the runner-up intent it considered. Deterministic, so a repeated ticket gets the same answer. Non-fluent tickets are first restated in plain English. | FR-03 | Next |
 | **3. Policy gate** | Pure code. Blocks the four never-automate intents, any ticket matching the keyword safety net in `config/never_auto.yaml` (catches 94% of these tickets on development data even if the classifier is wrong), and short tickets that name no product or error. | FR-04 | Specified |
-| **4. Retrieve** | Searches the 29 help articles, split into sections with resolution steps kept whole. Combines MiniLM embeddings in Chroma with BM25 keyword search by reciprocal rank fusion. Returns the top 5 passages. | FR-05 | Specified |
-| **5. Route** | Answers automatically only if not blocked, intent confidence ≥ τc and retrieval score ≥ τr. A stricter τc applies to data residency and billing disputes. Assigns exactly one reason code. | FR-06 | Specified |
+| **4. Retrieve** | Searches the 29 help articles, split at their headings into 116 sections (Symptoms, Common causes, Resolution, Notes), so resolution steps are never split. Combines MiniLM embeddings in Chroma with BM25 keyword search by reciprocal rank fusion. Returns up to 5 passages, one per article, each with an ID that resolves to the corpus. Passages below the relevance threshold (0.30) are dropped, and an empty list is a valid result. | FR-05 | **Built** |
+| **5. Route** | Answers automatically only if not blocked, intent confidence ≥ τc and a relevant passage was found. A stricter τc applies to data residency and billing disputes. Assigns exactly one reason code, plus a plain-language reason a support manager can read. | FR-06 | Specified |
 | **6. Generate** | Writes an answer using only the retrieved passages, as JSON with each claim tied to an article ID. Returns "not answerable" rather than guessing. The AI-drafted label is added by code. | FR-07 | Specified |
 | **7. Validate** | Five checks before sending: no private data; citations only from retrieved articles; no promises of refunds, fixes or dates, and no requests for credentials; no advice for a plan the customer isn't on; tone and length per channel. A separate claim-checker model confirms each claim is supported. Any failure escalates. | FR-08 | Specified |
 | **8. Escalate** | Builds the escalation packet and places it in the human queue by urgency, tier and age. | FR-09 | Specified |
@@ -157,10 +160,10 @@ All free and open source, as the brief requires.
 | API | FastAPI, served by Uvicorn |
 | Orchestration | LangGraph (on LangChain) |
 | Language model | Groq, `llama-3.3-70b-versatile` (classification, generation); `llama-3.1-8b-instant` (claim checking). Configurable. |
-| Embeddings | `sentence-transformers/all-MiniLM-L6-v2` |
+| Embeddings | `all-MiniLM-L6-v2`, run with ONNX Runtime (Chroma's built-in model) |
 | Vector store | Chroma |
-| Keyword search | BM25 |
-| Decision log | PostgreSQL (in Docker), through SQLAlchemy |
+| Keyword search | BM25 (`rank-bm25`) |
+| Decision log | SQLAlchemy: SQLite by default, PostgreSQL by changing `DATABASE_URL` |
 | Monitoring | Prometheus and Grafana |
 | Testing and CI | pytest, httpx; GitHub Actions |
 
@@ -176,6 +179,7 @@ CloudServe-Support/
 │   │   └── schemas.py         TicketIn, NormalisedTicket, TicketResult, ReasonCode
 │   ├── pipeline/
 │   │   ├── ingest.py          validation, email cleaning, name masking
+│   │   ├── retrieve.py        hybrid retrieval over the 29 articles
 │   │   └── graph.py           handle(): the per-ticket error boundary and pipeline
 │   ├── harness/
 │   │   └── __main__.py        batch runner: --input / --output / --resume / --limit
@@ -184,15 +188,20 @@ CloudServe-Support/
 ├── tests/
 │   ├── test_ingest.py         FR-01
 │   ├── test_harness.py        FR-02 and the API
-│   └── test_errors.py         error boundary and API error handling
+│   ├── test_errors.py         error boundary and API error handling
+│   └── test_retrieve.py       FR-05
+├── eval/
+│   └── retrieval_check.py     measures retrieval recall and sets the relevance threshold
 ├── data/                      development, validation and documentation JSON
+├── docs/
+│   └── architecture_diagram.excalidraw
 ├── prompts/                   versioned prompt files (PR-01 to PR-04)
 ├── pyproject.toml
 ├── uv.lock
 └── README.md
 ```
 
-Planned additions as the build continues: `pipeline/classify.py`, `policy.py`, `retrieve.py`, `route.py`, `generate.py`, `validate.py`; `store/` (decision log); `eval/` (evaluation harness and fairness audit); `config/never_auto.yaml`; `docker-compose.yml`; `.env.example`; `.github/workflows/ci.yml`.
+Planned additions as the build continues: `pipeline/classify.py`, `policy.py`, `route.py`, `generate.py`, `validate.py`; `store/` (decision log); metrics report and fairness audit in `eval/`; `config/never_auto.yaml`; `.env.example`; `.github/workflows/ci.yml`.
 
 ---
 
@@ -201,8 +210,8 @@ Planned additions as the build continues: `pipeline/classify.py`, `policy.py`, `
 ### Prerequisites
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) (installs Python 3.11 automatically if needed)
-- Docker, once the PostgreSQL decision log is added
-- A free Groq API key, once classification is added
+- Internet access on first run: the embedding model (about 80 MB) downloads once and is cached in `~/.cache/chroma`
+- A free model-provider API key, once classification is added
 
 ### Install
 
@@ -228,9 +237,12 @@ Settings are read from environment variables, or from a `.env` file that is neve
 | Variable | Purpose | Default |
 |---|---|---|
 | `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING` or `ERROR` | `INFO` |
+| `DOCS_PATH` | Help articles file | `data/documentation.json` |
+| `RETRIEVAL_TOP_K` | Maximum passages returned per ticket | `5` |
+| `RETRIEVAL_MIN_SCORE` | Relevance threshold; passages below it are dropped | `0.30` |
 | `GROQ_API_KEY` | Model provider key *(needed from FR-03)* | none |
 | `LLM_MODEL` | Model for classification and generation *(from FR-03)* | `llama-3.3-70b-versatile` |
-| `DATABASE_URL` | PostgreSQL connection for the decision log *(from FR-10)* | none |
+| `DATABASE_URL` | Decision log database *(from FR-10)* | `sqlite:///./storage/decisions.db` |
 | `KILL_SWITCH` | `true` sends every ticket to a human *(from FR-11)* | `false` |
 
 ---
@@ -287,6 +299,28 @@ curl -X POST http://localhost:8000/tickets \
     "language_fluency": "fluent"
   }'
 ```
+
+### Retrieval check
+
+Measures retrieval recall against the labelled tickets and shows how each relevance threshold trades recall against noise. Use development tickets to choose settings; use validation tickets only to confirm.
+
+```bash
+uv run python eval/retrieval_check.py --tickets data/development_tickets.json
+```
+
+Results on the 357 answerable development tickets:
+
+| Mode | Recall@1 | Recall@3 | Recall@5 |
+|---|---|---|---|
+| Keyword only (fallback) | 89.4% | 94.4% | 96.9% |
+| **Hybrid** | **90.5%** | **97.5%** | **98.9%** |
+
+| Threshold | Correct articles kept | Unanswerable tickets still matched |
+|---|---|---|
+| 0.25 | 97.5% | 89.5% |
+| **0.30 (chosen)** | **95.5%** | **88.8%** |
+| 0.35 | 94.1% | 86.7% |
+| 0.40 | 92.4% | 85.3% |
 
 ### Output format
 
@@ -379,13 +413,14 @@ Errors are handled at three levels, so the system always returns a result and ne
 uv run pytest -v
 ```
 
-**37 tests, all passing.** Test names include the test case IDs from the traceability table (for example `test_tc_02_03_bad_tickets_do_not_stop_run`).
+**48 tests, all passing.** Test names include the test case IDs from the traceability table (for example `test_tc_02_03_bad_tickets_do_not_stop_run`).
 
 | File | Covers |
 |---|---|
 | `test_ingest.py` | TC-01-01 to TC-01-04: every channel converts; empty chat subject; malformed tickets rejected; names masked; email cleaning; all 500 development tickets convert |
 | `test_harness.py` | TC-02-01 to TC-02-04: 500 in, 500 out; temporary paths through the real command line; bad and crashing tickets don't stop the run; resume after interruption. TC-01-05: the API returns a decision. Plus run-level errors and exit codes. |
 | `test_errors.py` | Error boundary: unexpected errors become `PIPELINE_ERROR`; known errors keep their code; numeric ticket IDs; error details never contain ticket text; API handling of invalid JSON, empty bodies and server errors |
+| `test_retrieve.py` | TC-05-01 to TC-05-03: keyword recall@5 ≥ 90% on development tickets; index holds only the 29 articles; resolution steps never split. Plus: passages resolve to the corpus (A4); one passage per article; deterministic results; irrelevant and empty queries return nothing; fallback to keyword search when the model can't load (A11). Uses a small offline embedder so tests need no network. |
 
 ---
 
@@ -394,15 +429,15 @@ uv run pytest -v
 | Requirement | Description | Status |
 |---|---|---|
 | FR-01 | Accept tickets from all four channels; one internal format | ✅ Built, tested |
-| FR-02 | Unattended batch harness with input and output paths | ✅ Built, tested |
-| FR-03 | Intent and urgency with calibrated confidence | Specified |
+| FR-02 | Unattended batch harness with input and output paths | ✅ Built, tested; 80/80 validation tickets processed |
+| FR-03 | Intent and urgency with calibrated confidence | Next |
 | FR-04 | Policy gate for never-automate tickets | Specified |
-| FR-05 | Hybrid retrieval over the 29 articles | Specified (next) |
+| FR-05 | Hybrid retrieval over the 29 articles | ✅ Built, tested; recall@5 98.9% |
 | FR-06 | Routing with data-driven thresholds | Specified |
 | FR-07 | Grounded, cited, AI-labelled answers | Specified |
 | FR-08 | Pre-send validation checks | Specified |
 | FR-09 | Escalation packet and priority queue | Specified |
-| FR-10 | PostgreSQL decision log | Specified |
+| FR-10 | Decision log | Specified |
 | FR-11 | Fail-safe and kill switch | Specified |
 | FR-12 | No private answer files as a source *(Will not)* | Enforced by design |
 
@@ -418,7 +453,7 @@ Every component traces back to a requirement, and every requirement traces back 
 | FR-02 | `harness/__main__.py`, `pipeline/graph.py` | none | TC-02-01 to TC-02-04 |
 | FR-03 | `pipeline/classify.py` *(planned)* | PR-01 | TC-03-01 to TC-03-04 |
 | FR-04 | `pipeline/policy.py` *(planned)* | PR-01 (unclear only) | TC-04-01 to TC-04-04 |
-| FR-05 | `pipeline/retrieve.py` *(planned)* | none | TC-05-01 to TC-05-03 |
+| FR-05 | `pipeline/retrieve.py` | none | TC-05-01 to TC-05-03 |
 | FR-06 | `pipeline/route.py` *(planned)* | none | TC-06-01 to TC-06-04 |
 | FR-07 | `pipeline/generate.py` *(planned)* | PR-02; evaluated by PR-05, PR-06 | TC-07-01 to TC-07-04 |
 | FR-08 | `pipeline/validate.py` *(planned)* | PR-04; evaluated by PR-05 | TC-08-01 to TC-08-06 |
@@ -442,7 +477,8 @@ Every component traces back to a requirement, and every requirement traces back 
 
 ## Known limitations
 
-- **Only the intake and harness are built.** Results produced before classification exists are placeholders.
+- **Intake, harness and retrieval are built; retrieval is not yet wired into the pipeline.** Until classification exists, every ticket is escalated with `LOW_CONFIDENCE` as a placeholder, and those results must not be reported.
+- **The retrieval score can't tell answerable from unanswerable tickets** (median 0.59 vs 0.58), so it is used only to drop irrelevant passages.
 - **Masking and email cleaning are tested only on made-up examples.** None of the 500 development tickets contains a customer name or a quoted email thread.
 - **Routing accuracy has a ceiling below 100%.** 35 of 78 repeated ticket texts carry different routing labels in the data.
 - **Urgency labels are inconsistent** (67 of 78 repeated texts disagree), so no urgency accuracy target is set.
@@ -456,6 +492,11 @@ Every component traces back to a requirement, and every requirement traces back 
 |---|---|---|
 | 1 | Added reason code `INVALID_INPUT` | FR-01 escalates malformed tickets, but PRD v1.0 had no code for it |
 | 2 | Added reason code `PIPELINE_ERROR` | No existing code covered an unexpected internal error |
+| 3 | Time to first reply measured as the system's own processing time (`latency_ms`) | Tickets are historical (March to May) replayed today, so `responded_at − received_at` gives about six months, which is meaningless |
+| 4 | Embeddings run on ONNX Runtime instead of sentence-transformers | Windows Application Control blocked PyTorch; same model, much smaller install |
+| 5 | Retrieval falls back to keyword-only search if the embedding model can't load | Degrade rather than stop (A11) |
+| 6 | Retrieval score is a relevance filter only; answerability decided by policy gate, confidence and the generator | Measured: unanswerable tickets score almost as high as answerable ones |
+| 7 | Classifier must be deterministic; three samples at temperature 0.5 replaced | Build Specification A5: the same ticket must always get the same decision |
 
 ---
 
@@ -467,6 +508,7 @@ Every component traces back to a requirement, and every requirement traces back 
 | 2 | Product requirements document (PRD v1.0): 12 functional and 10 non-functional requirements | Complete |
 | 3 | Prompt library: specifications, prompt register PR-01 to PR-08, traceability | Complete |
 | 4 | Sprint plan | In progress |
+| — | Build Specification acceptance criteria A1–A12 | Tracked against the build |
 | 5 | Build, evaluation and revised PRD | In progress |
 | 6 | Report, video and effort log | Not started |
 
