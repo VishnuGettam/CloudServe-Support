@@ -34,3 +34,6 @@ pgdata/
 .idea/
 .DS_Store
 Thumbs.db
+
+# envrionment variables for OpenRouter API key
+.env

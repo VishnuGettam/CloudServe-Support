@@ -35,7 +35,6 @@ from typing import Protocol
 
 import numpy as np
 from rank_bm25 import BM25Okapi
-
 from cloudserve_support.errors import PipelineError
 
 log = logging.getLogger(__name__)
