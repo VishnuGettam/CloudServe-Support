@@ -6,7 +6,8 @@ self-contained, and splitting at headings never breaks a numbered list of
 resolution steps. The title and plan line are repeated in every chunk so a
 chunk still makes sense on its own.
 
-Search: meaning-based search (MiniLM embeddings in Chroma) and keyword search
+Search: meaning-based search (all-MiniLM-L6-v2 embeddings, run with ONNX
+Runtime, stored in Chroma) and keyword search
 (BM25) each rank every chunk; the two rankings are merged by reciprocal rank
 fusion. Results are reduced to one passage per article, best first.
 
@@ -40,7 +41,6 @@ from cloudserve_support.errors import PipelineError
 log = logging.getLogger(__name__)
 
 DEFAULT_DOCS_PATH = "data/documentation.json"
-DEFAULT_MODEL = "all-MiniLM-L6-v2"
 DEFAULT_MIN_SCORE = 0.30  # starting point; set from data by eval/retrieval_check.py
 DEFAULT_BM25_MIN = 2.0  # used only when the embedding model is unavailable
 RRF_K = 60
@@ -60,15 +60,23 @@ class Embedder(Protocol):
 
 
 class MiniLMEmbedder:
-    """Wraps sentence-transformers; returns unit-length vectors."""
+    """all-MiniLM-L6-v2 run through ONNX Runtime (Chroma's built-in copy of the model).
 
-    def __init__(self, model_name: str) -> None:
-        from sentence_transformers import SentenceTransformer  # heavy import, load once
+    Same model as the sentence-transformers version, but without PyTorch: a
+    much smaller install, and it avoids Windows Application Control blocking
+    PyTorch's DLLs. The model (about 80 MB) downloads once on first use and is
+    cached by Chroma. Returns unit-length vectors.
+    """
 
-        self.model = SentenceTransformer(model_name)
+    def __init__(self) -> None:
+        from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
+
+        self._fn = ONNXMiniLM_L6_V2()
 
     def encode(self, texts: list[str]) -> np.ndarray:
-        return np.asarray(self.model.encode(texts, normalize_embeddings=True), dtype=np.float32)
+        vectors = np.asarray(self._fn(texts), dtype=np.float32)
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        return vectors / np.where(norms == 0, 1, norms)
 
 
 @dataclass(frozen=True)
@@ -156,7 +164,7 @@ class Retriever:
         self.collection = None
         if use_embeddings:
             try:
-                self.embedder = embedder or MiniLMEmbedder(os.getenv("EMBEDDING_MODEL", DEFAULT_MODEL))
+                self.embedder = embedder or MiniLMEmbedder()
                 self._build_vector_store()
             except Exception as exc:  # noqa: BLE001 - degrade to keyword search, never stop
                 log.warning("embedding search unavailable, using keyword search only: %s", exc)

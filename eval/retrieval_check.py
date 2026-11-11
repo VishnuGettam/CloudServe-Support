@@ -47,9 +47,16 @@ def main() -> None:
     hybrid = Retriever(args.docs, min_score=0.0)
     keyword = Retriever(args.docs, use_embeddings=False)
     print(f"mode: {hybrid.mode}; {len(answerable)} answerable, {len(other)} not answerable\n")
+    if hybrid.mode != "hybrid":
+        print("WARNING: the embedding model did not load (see the warning above), so this run")
+        print("measures keyword search only. Similarity scores and the threshold table need")
+        print("the model; fix the warning and run again.\n")
     print("recall (answerable tickets)")
     print(f"  hybrid       {recall(hybrid, answerable)}")
     print(f"  keyword-only {recall(keyword, answerable)}\n")
+
+    if hybrid.mode != "hybrid":
+        return
 
     def top_score(t: dict) -> float:
         results = hybrid.search(ingest(t).text, k=1)
