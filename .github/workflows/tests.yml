@@ -1,0 +1,48 @@
+# Runs the full test suite on every push and pull request (A12: one test command).
+# Tests never call the real model: the API key is blank here and in tests/conftest.py.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      OPENROUTER_API_KEY: ""
+      KILL_SWITCH: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv and Python 3.14
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - name: Cache the embedding model (all-MiniLM-L6-v2, ONNX)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/chroma/onnx_models
+          key: minilm-onnx-v1
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run tests
+        run: uv run python -m pytest -q
+
+      - name: Smoke test the harness (no model key, so answerable tickets escalate safely)
+        run: |
+          uv run python -m cloudserve_support.harness --input data/validation_tickets.json --output out/ci_results.json --limit 20
+          test -f out/ci_results.metrics.md
+
+      - name: Keep the smoke-test outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-results
+          path: out/
+          if-no-files-found: ignore

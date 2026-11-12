@@ -1,0 +1,49 @@
+# Mandatory caveats (owned by Support; reviewed with the help-article owners).
+#
+# When an automatic reply cites one of these articles, the caveat is added to
+# the reply by code, under the answer. The model is not asked to remember it.
+#
+# Why: the pre-send checks catch claims the articles don't support, but not
+# important facts the model left out. Validation ticket VAL-0026 (data must
+# stay in the EU for a contract) got a grounded reply that omitted that
+# metadata is stored centrally and that moving region needs a migration.
+#
+# Rule for adding an entry: leaving the fact out could cost the customer
+# data, access, money, or a commitment they can't undo.
+#
+# Each caveat must be copied WORD FOR WORD from its article. The system checks
+# this at startup and refuses to start if any caveat is not in its article,
+# so caveats can't drift away from the documentation.
+
+version: "1.0"
+
+caveats:
+  DOC-DATA-003:
+    - Metadata such as account names and billing records is stored centrally regardless of the data region.
+    - Migrating an organisation between regions requires a planned migration with support and involves a maintenance window.
+  DOC-DEPLOY-002:
+    - Rollback restores the container image and its configuration together. It does not restore data.
+  DOC-DATA-002:
+    - Retention is seven days on Standard, thirty days on Business and ninety days on Enterprise plans.
+  DOC-ONB-002:
+    - Applications that write to the local filesystem will lose that data on every deployment and every scaling event.
+  DOC-API-003:
+    - Failed deliveries are retried with backoff for twenty-four hours, after which the endpoint is disabled and the account is notified.
+  DOC-INT-002:
+    - Forwarding pauses after one hour of consecutive failures and must be resumed manually once the destination is healthy.
+  DOC-AUTH-002:
+    - Support cannot disable multi-factor authentication without identity verification, regardless of urgency.
+  DOC-AUTH-004:
+    - Keys issued to individual users are removed when that user is deleted. Use service accounts for anything running in production.
+  DOC-INT-001:
+    - Service account keys do not expire by default. Set an expiry and rotate on a schedule.
+  DOC-DEPLOY-004:
+    - A secret that has been printed to logs should be treated as exposed and rotated, even if the logs are private.
+  DOC-SEC-002:
+    - Never send a live credential to support. Support will never ask for one, and any credential shared in a ticket must be treated as exposed.
+  DOC-BILL-002:
+    - Annual plans cannot be downgraded mid-term, but capacity can be reduced with effect from the renewal date.
+  DOC-BILL-003:
+    - Spend caps apply per organisation and cannot currently be set per project.
+  DOC-ACCT-002:
+    - Project names appear in resource identifiers and cannot be changed after creation.

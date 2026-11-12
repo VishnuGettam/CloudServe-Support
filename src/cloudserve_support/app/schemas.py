@@ -98,6 +98,7 @@ class TicketResult(BaseModel):
     sensitive: str | None = None
     response: str | None = None
     cited_doc_ids: list[str] = Field(default_factory=list)
+    caveat_doc_ids: list[str] = Field(default_factory=list)  # articles whose mandatory caveats were added to the reply
     checks: list[str] = Field(default_factory=list)  # pre-send checks that ran, with results
     model: str | None = None
     cached: bool | None = None  # True when the answer came from the response cache, not a fresh model call

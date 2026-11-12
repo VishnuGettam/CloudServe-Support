@@ -160,6 +160,7 @@ def build_report(results: list[dict[str, Any]], tickets: list[dict[str, Any]] | 
         "auto_replies_with_citation": _pct(sum(bool(r.get("cited_doc_ids")) for r in auto), len(auto)),
         "auto_replies_passing_all_checks": _pct(
             sum(bool(r.get("checks")) and all(c.endswith(":pass") for c in r["checks"]) for r in auto), len(auto)),
+        "auto_replies_with_mandatory_caveats": sum(bool(r.get("caveat_doc_ids")) for r in auto),
         "policy_blocked": sum(r.get("reason_code") in {"POLICY_BLOCKED", "KEYWORD_BLOCKED"} for r in results),
         "sensitive_held": sum(r.get("reason_code") == "SENSITIVE_CLASS" for r in results),
         "kill_switch_escalations": sum(r.get("reason_code") == "KILL_SWITCH" for r in results),

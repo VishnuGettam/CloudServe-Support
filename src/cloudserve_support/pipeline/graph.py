@@ -30,6 +30,7 @@ from typing import Any
 from cloudserve_support.app.schemas import NormalisedTicket, ReasonCode, TicketResult
 from cloudserve_support.decision_log import record_decision
 from cloudserve_support.errors import CloudServeError, ModelUnavailable, describe, safe_ticket_id
+from cloudserve_support.pipeline.caveats import get_caveats
 from cloudserve_support.pipeline.classify import get_classifier
 from cloudserve_support.pipeline.escalate import build_packet
 from cloudserve_support.pipeline.generate import Draft, generate
@@ -51,9 +52,10 @@ def kill_switch_on() -> bool:
 
 
 def warm_up() -> None:
-    """Load the classifier, policy gate and retriever once, before the first ticket."""
+    """Load the classifier, policy gate, caveats and retriever once, before the first ticket."""
     get_classifier()
     get_policy_gate()
+    get_caveats()
     get_retriever()
 
 
@@ -63,11 +65,19 @@ AI_LABEL = (
 )
 
 
-def format_reply(draft: Draft) -> str:
-    """The customer-facing reply: answer, sources, and the AI-drafted label (always added by code)."""
+def format_reply(draft: Draft, caveats: list[tuple[str, str]] | None = None) -> str:
+    """The customer-facing reply, assembled by code:
+
+    answer, then any mandatory caveats for the cited articles (quoted from the
+    articles), then the sources, then the AI-drafted label.
+    """
     cited = list(dict.fromkeys(c["doc_id"] for c in draft.citations))
     sources = "; ".join(f"{d} ({draft.articles[d]['title']})" for d in cited)
-    return f"{draft.answer}\n\nSources: {sources}\n\n{AI_LABEL}"
+    parts = [draft.answer]
+    if caveats:
+        parts.append("Important to know:\n" + "\n".join(f"- {text} ({doc_id})" for doc_id, text in caveats))
+    parts += [f"Sources: {sources}", AI_LABEL]
+    return "\n\n".join(parts)
 
 
 def process(ticket: NormalisedTicket) -> TicketResult:
@@ -133,10 +143,14 @@ def process(ticket: NormalisedTicket) -> TicketResult:
                         draft=draft, failed_check=check.failed_check, detail=check.detail, checks=check.checks)
 
     cited = list(dict.fromkeys(c_["doc_id"] for c_ in draft.citations))
+    caveats = get_caveats().for_docs(cited)  # mandatory facts the answer must carry, added by code
+    checks = [*check.checks, "caveats:pass"]  # which caveats were added is in caveat_doc_ids
     return TicketResult(
         **common, route="auto_respond", reason_code=ReasonCode.AUTO_RESPONDED,
-        reason_text=f"{decision.reason_text} Passed all {len(check.checks)} pre-send checks.",
-        response=format_reply(draft), cited_doc_ids=cited, checks=check.checks,
+        reason_text=f"{decision.reason_text} Passed all {len(check.checks)} pre-send checks"
+                    + (f"; {len(caveats)} mandatory caveat(s) added." if caveats else "."),
+        response=format_reply(draft, caveats), cited_doc_ids=cited, checks=checks,
+        caveat_doc_ids=list(dict.fromkeys(d for d, _ in caveats)),
         model=draft.model, cached=draft.cached, prompt_version=draft.prompt_version, responded_at=_now(),
     )
 
