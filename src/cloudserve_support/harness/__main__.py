@@ -10,6 +10,9 @@ Guarantees:
 - Progress is saved after every ticket, so an interrupted run continues with
   --resume. Progress from a different input file is never reused.
 - The output file is written atomically: it is either complete or absent.
+- Every decision is written to the decision log (FR-10), tagged with this
+  run's id, and a metrics report is written next to the output (A10):
+  <output>.metrics.json and <output>.metrics.md.
 
 Exit codes:
     0    finished; every ticket has a result
@@ -27,10 +30,13 @@ import logging
 import os
 import time
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from cloudserve_support.logging_config import setup_logging
+from cloudserve_support.metrics import write_report
+from cloudserve_support.pipeline.escalate import human_queue
 from cloudserve_support.pipeline.graph import handle, warm_up
 
 log = logging.getLogger("cloudserve_support.harness")
@@ -164,13 +170,14 @@ def run(input_path: Path, output_path: Path, resume: bool = False, limit: int | 
     except Exception as exc:  # noqa: BLE001 - each ticket will then escalate with PIPELINE_ERROR
         log.error("pipeline could not start (%s); tickets will be escalated", exc)
 
+    run_id = f"harness:{input_path.stem}:{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"[:64]
     started = time.perf_counter()
     try:
         with progress.open("a", encoding="utf-8") as sink:
             for index, raw in enumerate(tickets):
                 if index in done:
                     continue
-                result = handle(raw).model_dump(mode="json")
+                result = handle(raw, source=run_id).model_dump(mode="json")
                 done[index] = result
                 sink.write(json.dumps({"index": index, "result": result}) + "\n")
                 sink.flush()
@@ -179,6 +186,8 @@ def run(input_path: Path, output_path: Path, resume: bool = False, limit: int | 
 
         results = [done[i] for i in range(count)]
         write_atomically(output_path, results)
+        queue_path = output_path.with_name(output_path.stem + ".queue.json")
+        write_atomically(queue_path, human_queue(results))
     except OSError as exc:
         raise HarnessError(
             f"failed writing results ({exc.strerror}); progress kept, rerun with --resume", EXIT_WRITE_FAILED
@@ -187,8 +196,14 @@ def run(input_path: Path, output_path: Path, resume: bool = False, limit: int | 
     progress.unlink(missing_ok=True)
 
     elapsed = time.perf_counter() - started
+    try:
+        metrics_json, metrics_md = write_report(output_path, results, tickets, elapsed)
+        log.info("metrics report: %s", metrics_md)
+    except Exception as exc:  # noqa: BLE001 - results are already written; the report is extra
+        log.error("metrics report could not be written: %s", exc)
     reasons = Counter(r["reason_code"] for r in results)
-    log.info("done: %d tickets in %.1fs -> %s", count, elapsed, output_path)
+    log.info("done: %d tickets in %.1fs -> %s (human queue: %s)", count, elapsed, output_path,
+             output_path.with_name(output_path.stem + ".queue.json"))
     log.info("routes: %s", dict(Counter(r["route"] for r in results)))
     log.info("reason codes: %s", dict(reasons))
     for code in ("PIPELINE_ERROR", "INVALID_INPUT"):

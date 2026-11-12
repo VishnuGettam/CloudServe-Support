@@ -1,6 +1,7 @@
 """Tests for FR-02 (harness) and TC-01-05 (API). IDs match the Stage 3 table."""
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -58,6 +59,7 @@ def test_tc_02_02_runs_on_temporary_paths(tmp_path):
         [sys.executable, "-m", "cloudserve_support.harness", "--input", str(src), "--output", str(out)],
         capture_output=True,
         text=True,
+        env={**os.environ, "OPENROUTER_API_KEY": ""},  # never call the real model from tests
     )
     assert completed.returncode == 0, completed.stderr
     assert len(json.loads(out.read_text())) == 2
@@ -94,11 +96,11 @@ def test_tc_02_04_resume_after_interruption(tmp_path, monkeypatch):
     real_handle = graph.handle
     calls = {"n": 0}
 
-    def crash_on_fourth(raw):
+    def crash_on_fourth(raw, **kwargs):
         calls["n"] += 1
         if calls["n"] == 4:
             raise KeyboardInterrupt  # simulate the process being stopped
-        return real_handle(raw)
+        return real_handle(raw, **kwargs)
 
     import cloudserve_support.harness.__main__ as harness
 
@@ -110,9 +112,9 @@ def test_tc_02_04_resume_after_interruption(tmp_path, monkeypatch):
 
     seen = []
 
-    def counting(raw):
+    def counting(raw, **kwargs):
         seen.append(raw["ticket_id"])
-        return real_handle(raw)
+        return real_handle(raw, **kwargs)
 
     monkeypatch.setattr(harness, "handle", counting)
     results = run(src, out, resume=True)
@@ -166,7 +168,7 @@ def test_ctrl_c_returns_130_and_keeps_progress(tmp_path, monkeypatch):
 
     src = write(tmp_path / "in.json", [make_ticket(1), make_ticket(2)])
     out = tmp_path / "out.json"
-    monkeypatch.setattr(harness, "handle", lambda raw: (_ for _ in ()).throw(KeyboardInterrupt))
+    monkeypatch.setattr(harness, "handle", lambda raw, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt))
     assert main(["--input", str(src), "--output", str(out)]) == 130
     assert progress_path(out).exists()
     assert not out.exists()

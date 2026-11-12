@@ -16,9 +16,11 @@ at least `min_score`. If nothing clears it, the result is an empty list:
 returning nothing is a valid answer, and is better than returning something
 irrelevant (Build Specification, Retrieve).
 
-If the embedding model cannot be loaded (for example no network on first
-run), retrieval falls back to keyword search only and logs a warning, rather
-than stopping the system (A11).
+Two fallbacks keep retrieval working rather than stopping the system (A11):
+- if Chroma cannot load, the same vectors are searched in memory with numpy;
+- if the embedding model cannot load (for example no network on first run),
+  retrieval falls back to keyword search only.
+Both log a warning.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from typing import Protocol
 
 import numpy as np
 from rank_bm25 import BM25Okapi
+
 from cloudserve_support.errors import PipelineError
 
 log = logging.getLogger(__name__)
@@ -58,24 +61,81 @@ class Embedder(Protocol):
     def encode(self, texts: list[str]) -> np.ndarray: ...
 
 
-class MiniLMEmbedder:
-    """all-MiniLM-L6-v2 run through ONNX Runtime (Chroma's built-in copy of the model).
+MODEL_URL = "https://chroma-onnx-models.s3.amazonaws.com/all-MiniLM-L6-v2/onnx.tar.gz"
+MODEL_SHA256 = "913d7300ceae3b2dbc2c50d1de4baacab4be7b9380491c27fab7418616a16ec3"
+MODEL_DIR = Path.home() / ".cache" / "chroma" / "onnx_models" / "all-MiniLM-L6-v2"
 
-    Same model as the sentence-transformers version, but without PyTorch: a
-    much smaller install, and it avoids Windows Application Control blocking
-    PyTorch's DLLs. The model (about 80 MB) downloads once on first use and is
-    cached by Chroma. Returns unit-length vectors.
+
+def _ensure_model(folder: Path) -> Path:
+    """Return the folder holding model.onnx and tokenizer.json, downloading them once if needed."""
+    onnx_dir = folder / "onnx"
+    if (onnx_dir / "model.onnx").exists() and (onnx_dir / "tokenizer.json").exists():
+        return onnx_dir
+    import hashlib
+    import tarfile
+
+    import httpx
+
+    folder.mkdir(parents=True, exist_ok=True)
+    archive = folder / "onnx.tar.gz"
+    log.info("downloading embedding model (about 80 MB, once) to %s", folder)
+    with httpx.stream("GET", MODEL_URL, timeout=120, follow_redirects=True) as response:
+        response.raise_for_status()
+        with archive.open("wb") as fh:
+            for block in response.iter_bytes():
+                fh.write(block)
+    if hashlib.sha256(archive.read_bytes()).hexdigest() != MODEL_SHA256:
+        archive.unlink(missing_ok=True)
+        raise OSError("downloaded embedding model failed its checksum")
+    with tarfile.open(archive) as tar:
+        tar.extractall(folder, filter="data")
+    return onnx_dir
+
+
+class MiniLMEmbedder:
+    """all-MiniLM-L6-v2 run directly with ONNX Runtime and the `tokenizers` library.
+
+    The same model file Chroma uses (and caches in the same folder), but loaded
+    without importing Chroma, so it keeps working if Chroma or one of its
+    dependencies cannot load. Mean pooling over tokens, then unit length,
+    exactly as sentence-transformers does. No PyTorch.
     """
 
-    def __init__(self) -> None:
-        from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
+    def __init__(self, folder: Path | None = None) -> None:
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
 
-        self._fn = ONNXMiniLM_L6_V2()
+        onnx_dir = _ensure_model(Path(os.getenv("EMBEDDING_MODEL_DIR", folder or MODEL_DIR)))
+        self.tokenizer = Tokenizer.from_file(str(onnx_dir / "tokenizer.json"))
+        self.tokenizer.enable_truncation(max_length=256)
+        self.tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")
+        options = ort.SessionOptions()
+        options.log_severity_level = 3
+        self.session = ort.InferenceSession(str(onnx_dir / "model.onnx"), options, providers=["CPUExecutionProvider"])
 
     def encode(self, texts: list[str]) -> np.ndarray:
-        vectors = np.asarray(self._fn(texts), dtype=np.float32)
-        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-        return vectors / np.where(norms == 0, 1, norms)
+        out = []
+        for i in range(0, len(texts), 32):
+            encoded = self.tokenizer.encode_batch(texts[i : i + 32])
+            ids = np.array([e.ids for e in encoded], dtype=np.int64)
+            mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
+            hidden = self.session.run(None, {"input_ids": ids, "attention_mask": mask, "token_type_ids": np.zeros_like(ids)})[0]
+            weights = mask[..., None].astype(np.float32)
+            pooled = (hidden * weights).sum(1) / np.clip(weights.sum(1), 1e-9, None)
+            out.append(pooled / np.clip(np.linalg.norm(pooled, axis=1, keepdims=True), 1e-12, None))
+        return np.concatenate(out).astype(np.float32)
+
+
+class NumpyVectorStore:
+    """Exact cosine search in memory. Used only if Chroma cannot load; 116 vectors need nothing more."""
+
+    def __init__(self, ids: list[str], vectors: np.ndarray) -> None:
+        self.ids, self.vectors = ids, vectors
+
+    def query(self, query_embeddings: list[list[float]], n_results: int) -> dict:
+        sims = self.vectors @ np.asarray(query_embeddings[0], dtype=np.float32)
+        top = np.argsort(-sims, kind="stable")[:n_results]
+        return {"ids": [[self.ids[i] for i in top]], "distances": [[float(1 - sims[i]) for i in top]]}
 
 
 @dataclass(frozen=True)
@@ -161,6 +221,7 @@ class Retriever:
 
         self.embedder: Embedder | None = None
         self.collection = None
+        self.store = "none"
         if use_embeddings:
             try:
                 self.embedder = embedder or MiniLMEmbedder()
@@ -170,8 +231,8 @@ class Retriever:
                 self.embedder, self.collection = None, None
 
         log.info(
-            "retriever ready: %d articles, %d chunks, mode=%s, min_score=%.2f",
-            len(self.articles), len(self.chunks), self.mode, self.min_score,
+            "retriever ready: %d articles, %d chunks, mode=%s, vector store=%s, min_score=%.2f",
+            len(self.articles), len(self.chunks), self.mode, self.store, self.min_score,
         )
 
     @property
@@ -179,18 +240,21 @@ class Retriever:
         return "hybrid" if self.collection is not None else "keyword-only"
 
     def _build_vector_store(self) -> None:
-        import chromadb
-        from chromadb.config import Settings
-
         vectors = self.embedder.encode([c.text for c in self.chunks])
-        client = chromadb.EphemeralClient(settings=Settings(anonymized_telemetry=False))
-        # Rebuilt on every start from documentation.json, so the index can never be stale.
-        self.collection = client.create_collection(f"docs-{uuid.uuid4().hex[:8]}", metadata={"hnsw:space": "cosine"})
-        self.collection.add(
-            ids=[c.chunk_id for c in self.chunks],
-            embeddings=vectors.tolist(),
-            metadatas=[{"doc_id": c.doc_id} for c in self.chunks],
-        )
+        ids = [c.chunk_id for c in self.chunks]
+        try:
+            import chromadb
+            from chromadb.config import Settings
+
+            client = chromadb.EphemeralClient(settings=Settings(anonymized_telemetry=False))
+            # Rebuilt on every start from documentation.json, so the index can never be stale.
+            self.collection = client.create_collection(f"docs-{uuid.uuid4().hex[:8]}", metadata={"hnsw:space": "cosine"})
+            self.collection.add(ids=ids, embeddings=vectors.tolist(), metadatas=[{"doc_id": c.doc_id} for c in self.chunks])
+            self.store = "chroma"
+        except Exception as exc:  # noqa: BLE001 - same search, done in memory
+            log.warning("Chroma unavailable, using in-memory vector search instead: %s", str(exc)[:200])
+            self.collection = NumpyVectorStore(ids, vectors)
+            self.store = "numpy"
 
     def article(self, doc_id: str) -> dict | None:
         """The full article for a doc_id, for the generator and citation checks."""

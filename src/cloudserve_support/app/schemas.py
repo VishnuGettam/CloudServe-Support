@@ -97,9 +97,21 @@ class TicketResult(BaseModel):
     policy_rule: str | None = None
     sensitive: str | None = None
     response: str | None = None
+    cited_doc_ids: list[str] = Field(default_factory=list)
+    checks: list[str] = Field(default_factory=list)  # pre-send checks that ran, with results
+    model: str | None = None
+    cached: bool | None = None  # True when the answer came from the response cache, not a fresh model call
+    prompt_version: str | None = None
+    policy_version: str | None = None
     packet: dict[str, Any] | None = None
     failed_check: str | None = None
     detail: str | None = None
     received_at: datetime | None = None
     responded_at: datetime
     latency_ms: float | None = None  # system processing time; used for time to first reply
+    # Who the ticket came from, by group only (no names or ids): used for the fairness audit.
+    channel: str | None = None
+    customer_tier: str | None = None
+    customer_region: str | None = None
+    language_fluency: str | None = None
+    input_hash: str | None = None  # sha256 of the cleaned ticket text: links the decision log to the input

@@ -10,11 +10,13 @@ exactly one TicketResult and never raises.
 `process` runs the pipeline for one valid ticket:
 
     kill switch -> classify -> policy gate -> retrieve -> route
+        -> (automatic route only) generate -> validate -> reply
+        -> (any other outcome) escalation packet
 
-Generation (FR-07) and pre-send validation (FR-08) are not built yet: a ticket
-routed to auto_respond is marked as such, with `response` left empty and a
-`detail` saying so. Escalations carry the classification, the reason and the
-retrieved sources; the written summary arrives with FR-09.
+A ticket is answered automatically only if routing allows it, the model
+drafts an answer from the articles, and the draft passes every pre-send
+check. Anything else escalates with a packet (FR-09). If the model can't be
+reached, the ticket escalates with MODEL_UNAVAILABLE (FR-11, A11).
 """
 
 from __future__ import annotations
@@ -26,12 +28,16 @@ from datetime import datetime, timezone
 from typing import Any
 
 from cloudserve_support.app.schemas import NormalisedTicket, ReasonCode, TicketResult
-from cloudserve_support.errors import CloudServeError, describe, safe_ticket_id
+from cloudserve_support.decision_log import record_decision
+from cloudserve_support.errors import CloudServeError, ModelUnavailable, describe, safe_ticket_id
 from cloudserve_support.pipeline.classify import get_classifier
+from cloudserve_support.pipeline.escalate import build_packet
+from cloudserve_support.pipeline.generate import Draft, generate
 from cloudserve_support.pipeline.ingest import ingest
 from cloudserve_support.pipeline.policy import get_policy_gate
 from cloudserve_support.pipeline.retrieve import get_retriever
-from cloudserve_support.pipeline.route import decide
+from cloudserve_support.pipeline.route import decide, thresholds
+from cloudserve_support.pipeline.validate import validate
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +57,19 @@ def warm_up() -> None:
     get_retriever()
 
 
+AI_LABEL = (
+    "This reply was drafted automatically by CloudServe's AI support assistant from our help articles. "
+    "If it doesn't solve the problem, reply to this message and a member of the support team will pick it up."
+)
+
+
+def format_reply(draft: Draft) -> str:
+    """The customer-facing reply: answer, sources, and the AI-drafted label (always added by code)."""
+    cited = list(dict.fromkeys(c["doc_id"] for c in draft.citations))
+    sources = "; ".join(f"{d} ({draft.articles[d]['title']})" for d in cited)
+    return f"{draft.answer}\n\nSources: {sources}\n\n{AI_LABEL}"
+
+
 def process(ticket: NormalisedTicket) -> TicketResult:
     """Run the pipeline for one valid ticket."""
     if kill_switch_on():
@@ -66,9 +85,6 @@ def process(ticket: NormalisedTicket) -> TicketResult:
 
     common: dict[str, Any] = dict(
         ticket_id=ticket.ticket_id,
-        route=decision.route,
-        reason_code=decision.reason_code,
-        reason_text=decision.reason_text,
         intent=c.intent,
         urgency=c.urgency,
         intent_confidence=c.intent_confidence,
@@ -77,28 +93,52 @@ def process(ticket: NormalisedTicket) -> TicketResult:
         retrieval_scores=[p.score for p in passages],
         policy_rule=policy.rule,
         sensitive=policy.sensitive,
+        policy_version=policy.policy_version,
         received_at=ticket.received_at,
-        responded_at=_now(),
     )
 
-    if decision.route == "auto_respond":
-        return TicketResult(**common, detail="generation not built yet (FR-07)")
+    def escalate(reason: ReasonCode, reason_text: str, draft: Draft | None = None,
+                 failed_check: str | None = None, detail: str | None = None,
+                 checks: list[str] | None = None) -> TicketResult:
+        packet = build_packet(ticket, reason, reason_text, c, policy, passages, thresholds(),
+                              draft_answer=draft.answer if draft and draft.answer else None,
+                              failed_check=failed_check, detail=detail)
+        return TicketResult(
+            **common, route="escalate", reason_code=reason, reason_text=reason_text, packet=packet,
+            failed_check=failed_check, detail=detail, checks=checks or [],
+            model=draft.model if draft else None, prompt_version=draft.prompt_version if draft else None,
+            cached=draft.cached if draft else None, responded_at=_now(),
+        )
 
-    packet = {
-        "reason": decision.reason_text,
-        "intent": c.intent,
-        "intent_confidence": c.intent_confidence,
-        "alternatives": common["alternatives"],
-        "urgency": c.urgency,
-        "customer_tier": ticket.customer_tier,
-        "channel": ticket.channel,
-        "sources": [
-            {"doc_id": p.doc_id, "title": p.title, "section": p.section, "score": p.score} for p in passages
-        ],
-        "policy_checks": policy.checks,
-        "policy_version": policy.policy_version,
-    }
-    return TicketResult(**common, packet=packet)
+    if decision.route != "auto_respond":
+        return escalate(decision.reason_code, decision.reason_text)
+
+    # Routed to an automatic answer: draft it, then check it before it can be sent.
+    try:
+        draft = generate(ticket, passages)
+    except ModelUnavailable as exc:
+        return escalate(ReasonCode.MODEL_UNAVAILABLE,
+                        "Sent to a human: the answer-writing model was unavailable.", detail=exc.detail)
+
+    if not draft.answerable and not draft.format_error:
+        missing = draft.missing_information or "the articles found do not answer this question"
+        return escalate(ReasonCode.WEAK_RETRIEVAL,
+                        "Sent to a human: the help articles found do not answer this question.",
+                        draft=draft, detail=f"generator: {missing}"[:200])
+
+    check = validate(draft, ticket.channel, ticket.customer_tier)
+    if not check.passed:
+        return escalate(ReasonCode.VALIDATION_FAILED,
+                        f"Sent to a human: the drafted answer failed the '{check.failed_check}' check.",
+                        draft=draft, failed_check=check.failed_check, detail=check.detail, checks=check.checks)
+
+    cited = list(dict.fromkeys(c_["doc_id"] for c_ in draft.citations))
+    return TicketResult(
+        **common, route="auto_respond", reason_code=ReasonCode.AUTO_RESPONDED,
+        reason_text=f"{decision.reason_text} Passed all {len(check.checks)} pre-send checks.",
+        response=format_reply(draft), cited_doc_ids=cited, checks=check.checks,
+        model=draft.model, cached=draft.cached, prompt_version=draft.prompt_version, responded_at=_now(),
+    )
 
 
 def escalation(
@@ -129,11 +169,16 @@ def _default_reason_text(reason: ReasonCode) -> str:
     }.get(reason, "Sent to a human.")
 
 
-def handle(raw: Any) -> TicketResult:
-    """Turn any raw input into exactly one result. Never raises."""
+def handle(raw: Any, source: str = "api") -> TicketResult:
+    """Turn any raw input into exactly one result, and log the decision (FR-10). Never raises.
+
+    `source` names where the ticket came from in the decision log: "api", or
+    the harness run id.
+    """
     started = time.perf_counter()
     ticket_id = safe_ticket_id(raw)
     received_at: datetime | None = None
+    ticket: NormalisedTicket | None = None
     try:
         ticket = ingest(raw)
         ticket_id, received_at = ticket.ticket_id, ticket.received_at
@@ -147,5 +192,12 @@ def handle(raw: Any) -> TicketResult:
         log.exception("unexpected error for ticket %s", ticket_id)
         result = escalation(ticket_id, ReasonCode.PIPELINE_ERROR, describe(exc), received_at)
 
+    if ticket is not None:  # group fields for the fairness audit; filled even when a later step failed
+        result.channel = ticket.channel
+        result.customer_tier = ticket.customer_tier
+        result.customer_region = ticket.customer_region
+        result.language_fluency = ticket.language_fluency
+        result.input_hash = ticket.input_hash
     result.latency_ms = round((time.perf_counter() - started) * 1000, 1)
+    record_decision(result, source)  # never raises: a logging failure must not lose the ticket
     return result

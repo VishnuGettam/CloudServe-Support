@@ -37,3 +37,6 @@ Thumbs.db
 
 # envrionment variables for OpenRouter API key
 .env
+
+# Storage for uploaded files
+storage/

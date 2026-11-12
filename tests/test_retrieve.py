@@ -36,6 +36,17 @@ def retriever():
 
 def test_hybrid_mode_with_vector_store(retriever):
     assert retriever.mode == "hybrid"
+    assert retriever.store in {"chroma", "numpy"}
+
+
+# A11: Chroma cannot load -> same search done in memory, still hybrid
+def test_falls_back_to_in_memory_vectors_when_chroma_fails(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "chromadb", None)  # makes "import chromadb" fail
+    r = Retriever(DOCS, embedder=FakeEmbedder(), min_score=0.05)
+    assert r.mode == "hybrid" and r.store == "numpy"
+    assert r.search("webhook signature verification fails")[0].doc_id == "DOC-API-003"
 
 
 # TC-05-02: the index holds only the 29 articles
