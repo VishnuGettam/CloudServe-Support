@@ -2,7 +2,7 @@
 
 An AI-assisted support system for **CloudServe Solutions**, a cloud infrastructure company whose support team is missing its response-time SLA. The system reads each incoming ticket, answers it automatically when it can do so safely and with cited sources, and otherwise hands it to a human with a complete summary attached.
 
-> **Project status (13 November 2026): build complete.** Every functional requirement (FR-01 to FR-12) is built and tested: 135 tests pass with one command. The pipeline runs as a **LangGraph** state graph, the knowledge base is a **LangChain** retriever, and the system is monitored with **Prometheus and Grafana**. On the 80 validation tickets, 0 of 14 must-never-automate tickets were answered automatically, every automatic reply carries citations and the AI label, and citation accuracy is 100%. See [Evaluation](#evaluation) and [Build status](#build-status).
+> **Project status (13 November 2026): build complete and evaluated.** Every functional requirement (FR-01 to FR-12) is built and tested: 136 tests pass with one command. The pipeline runs as a **LangGraph** state graph, the knowledge base is a **LangChain** retriever, and the system is monitored with **Prometheus and Grafana**. On the 80 validation tickets: **66% answered automatically, 0 of 14 must-never-automate tickets answered, 0 invented facts** in a manual review of 18 replies, and every automatic reply carries citations and the AI label. See [Evaluation](#evaluation).
 
 ---
 
@@ -232,7 +232,7 @@ CloudServe-Support/
 │   ├── observability.py       Prometheus metrics
 │   ├── errors.py              error classes, each mapped to a reason code
 │   └── logging_config.py      shared logging setup
-├── tests/                     135 tests (see Testing)
+├── tests/                     136 tests (see Testing)
 ├── eval/
 │   ├── retrieval_check.py     retrieval recall; sets the relevance threshold
 │   └── threshold_sweep.py     sets the routing confidence thresholds
@@ -275,10 +275,13 @@ cp .env.example .env      # then put your own key in .env, never in .env.example
 
 Run every command from the project folder. Running pytest from a parent folder makes it search the whole drive.
 
+**On Windows, use WSL (Ubuntu).** Windows Application Control (Smart App Control) blocks several compiled libraries this project uses, including `xxhash`, which LangGraph and LangChain need. The system still runs on Windows, using its fallbacks (a sequential engine and direct search, with identical decisions), but LangGraph itself runs only on Linux: WSL, Docker or CI. In WSL, keep the project inside the Linux filesystem (`~/...`, not `/mnt/c` or `/mnt/d`), and delete any `.venv` copied from Windows before running `uv sync`.
+
 ### Check the install
 
 ```bash
-uv run python -m pytest -q                          # 124 passed
+uv run python -m pytest -q                          # 136 passed (3 skip where LangGraph can't load)
+uv run python -m cloudserve_support.pipeline.orchestrator | head -3   # "---" / "config:" = LangGraph running
 uv run python -m cloudserve_support.llm --ping      # one test request with your key
 ```
 
@@ -361,18 +364,18 @@ Then open <http://localhost:8000/docs> to send a ticket from the browser.
 
 ### Monitoring (Prometheus and Grafana)
 
-Needs Docker. From the project folder:
+Needs Docker (on Windows: inside WSL, `sudo apt install docker.io docker-compose-v2`). From the project folder:
 
 ```bash
 cd monitoring
 docker compose up -d                                         # Prometheus :9090, Pushgateway :9091, Grafana :3000
 cd ..
-uv run uvicorn cloudserve_support.app.main:app --port 8000   # live tickets, scraped every 15 s
+uv run uvicorn cloudserve_support.app.main:app --host 0.0.0.0 --port 8000   # 0.0.0.0 so the Prometheus container can reach it
 uv run python -m cloudserve_support.harness --input data/validation_tickets.json \
     --output out/validation_results.json --pushgateway http://localhost:9091
 ```
 
-Open <http://localhost:3000> → dashboard **CloudServe Support Triage** (login `admin` / `admin`).
+Check <http://localhost:9090/targets>: `cloudserve_api` and `pushgateway` should both be **UP**. Then open <http://localhost:3000> → **Dashboards → CloudServe → CloudServe Support Triage** (login `admin` / `admin`). The dashboard adds API and harness tickets together.
 
 | Dashboard row | Panels |
 |---|---|
@@ -430,38 +433,77 @@ One `TicketResult` per ticket:
 
 ## Evaluation
 
-All figures are on the 80 validation tickets unless stated. Settings were chosen on the development tickets; validation was used to confirm. *(Run of 12 November; 13 tickets were waiting for the next day's model quota and are being re-run.)*
+Final run of 13 November 2026, on the 80 validation tickets, in WSL with the LangGraph engine and Chroma. Settings were chosen on the development tickets; validation was used to confirm. Full report: `out/validation_results.metrics.md`.
+
+### Results
 
 | Measure | Result |
 |---|---|
 | Must-never-automate tickets answered automatically | **0 of 14** |
-| Automatic replies with citation, AI label and all checks passed | **100%** |
-| Citation accuracy (cited article is one the labels expect) | **100%** |
-| Automation rate | 51% (about 256 tickets a week off the human queue) |
-| Escalations with a complete packet | 100% |
+| Automatic replies with citation, AI label and all checks passed | **100%** (53 of 53) |
+| Automatic replies carrying mandatory caveats | 28 |
+| Automation rate | **66.2%** (53 of 80), about **331 tickets a week** off the human queue |
+| Escalation rate | 33.8%, all with a complete escalation packet |
+| Model unavailable | 0 tickets |
 | Intent accuracy | 94.8% held out on development (validation shows 100%, inflated by reused templates) |
-| Retrieval: expected article found / ranked first | 98% / 96% |
-| Route agreement with the client's labels | 66% (limited by label noise, below) |
-| Urgency agreement | 41% (labels inconsistent; no target set) |
-| Drafts stopped before reaching a customer | 8: the model said the articles don't answer (5); a check failed (3: grounding 1, format 2) |
+| Retrieval: expected article found / ranked first | 98.1% / 96.2% |
+| Citation accuracy | 97.5% measured; **100% after review** (VAL-0080's label expects a health-check article for a dependency-resolution question; the reply cites the right one, DOC-DEPLOY-003) |
+| Route agreement with the client's labels | 71.2% (limited by label noise, below) |
+| Urgency agreement | 41.2% (labels inconsistent; no target set) |
+| Drafts stopped before reaching a customer | 9: the model said the articles don't answer (6); a check failed (3: format 2, grounding 1) |
+| Estimated first contact resolution from automation alone | 48.8% (automatic replies that cite an expected article on an answerable ticket), before any human resolution; baseline 42% |
 
-**Manual review of automatic answers.** 14 of the 41 automatic replies were checked against their articles by hand, including all 9 that the labels mark as "docs cannot answer":
-- 12 correct and grounded. 7 of the 9 flagged tickets are label noise: the articles do answer them (for example VAL-0060, webhook signatures over the raw body, DOC-API-003).
-- 1 accurate but missing the customer's point (VAL-0025: suggests a setting the customer had already changed).
-- 1 grounded but incomplete (VAL-0026, data residency for a contract: left out that metadata is stored centrally). This led to the mandatory caveats.
-- 0 invented facts.
+### Manual review of automatic replies
 
-**Latency** is reported by path, because one number hides the difference:
+18 of the 53 automatic replies were checked against their articles by hand, including all 13 that the labels mark as "docs cannot answer":
 
-| Path | Typical time |
-|---|---|
-| Blocked by policy (no model call) | under 10 ms |
-| Answer from the response cache | under 15 ms |
-| Fresh call to a free model | 29–37 s |
+| Outcome | Replies | Examples |
+|---|---|---|
+| Correct and grounded | 14 | VAL-0060: sign webhooks over the raw body (DOC-API-003). 9 of the 13 flagged tickets are label noise: the articles do answer them |
+| Correct, with one phrase slightly beyond the article | 1 | VAL-0071: says the spend cap can be "disabled"; the article says raised |
+| Accurate but missing the customer's point | 1 | VAL-0025: suggests a setting the customer had already changed |
+| Should have been escalated | 2 | VAL-0066: asks for *written confirmation* of data location to give to their own customer (compliance evidence). VAL-0072: disputes a charge "for a service I do not believe we use" (billing dispute) |
+| **Invented facts** | **0** | |
 
-The 3-second p95 target holds for every path except fresh free-model calls. Free models are shared and slow; a paid model or a dedicated deployment would be needed to meet it in production.
+Both should-have-escalated replies are requests for human action phrased as questions. Proposed fix, not applied (it would mean tuning the keyword rules on validation a second time): blocking phrases for compliance evidence ("written confirmation", "share with our customer", "auditor") and for disputes ("do not believe we use", "not ours").
 
-**Fairness.** Automation rates are compared, for each tier, region, fluency and channel, with the rate that group's own labels call for, so differences in ticket mix are not mistaken for unfairness. Groups more than 15 points below their expected rate are flagged in the metrics report.
+VAL-0026 (data must stay in the EU for a contract) shows the caveat mechanism working: its reply now carries "Metadata … is stored centrally regardless of the data region" and "Migrating … requires a planned migration with support".
+
+### Latency
+
+Reported by path, because one number hides the difference:
+
+| Path | Tickets | p50 | p95 |
+|---|---|---|---|
+| Blocked by policy (no model call) | 19 | 12 ms | 23 ms |
+| Answer from the response cache | 49 | 14 ms | 25 ms |
+| Fresh call to a free model | 12 | 6.1 s | 31.5 s |
+
+The 3-second p95 target holds for every path except fresh free-model calls. Free models are shared and slow; a paid model or a dedicated deployment is needed to meet it in production. Time to first reply for automatic answers is seconds, against 8–12 hours today.
+
+### Fairness
+
+Each group's automation rate is compared with the rate its own labels call for; a gap over 15 points is flagged.
+
+| Group | Automation | Labels expect | Gap |
+|---|---|---|---|
+| Tier: business / enterprise / standard | 90.0% / 75.0% / 47.6% | 70.0% / 75.0% / 50.0% | **+20.0** / 0.0 / −2.4 |
+| Fluency: fluent / non-fluent | 68.8% / 57.9% | 65.6% / 42.1% | +3.3 / **+15.8** |
+| Channel: docs comment (others within 5 points) | 68.8% | 50.0% | **+18.8** |
+| Region (all within 15 points) | 42.9%–72.0% | 42.9%–71.4% | −4.8 to +14.8 |
+
+No group is automated *less* than its tickets call for. The three flags are all *over*-automation against the labels. Most of it is the same "answerable" label noise found in the manual review, but not all: VAL-0066, one of the two replies that should have been escalated, comes from a non-fluent customer ("sorry for my english"). Customers who write less precisely are more likely to have a request for action read as a question, so the non-fluent flag is a real risk, and the place to look first when the policy rules are next revised.
+
+### Against the PRD targets
+
+| Measure | Target | Result |
+|---|---|---|
+| Escalation rate | 40% or below | ✅ 33.8% |
+| Unsafe automatic replies | Zero | ✅ 0 must-never tickets automated, 0 invented facts; 2 replies should have been escalated |
+| Time to first reply (automatic) | Under 5 minutes | ✅ p95 31.5 s on fresh model calls |
+| First contact resolution | 60% or above | Partly: 48.8% from automation alone; human resolution of escalated tickets adds to this but can't be measured offline |
+| Gap between customer groups | Under 5 points | ❌ Raw automation differs by up to 42 points between tiers, mostly because of ticket mix; against each group's own labels, the largest gap is 20 points |
+| Customer satisfaction, repeat contacts | 4.0, about 11% | Can't be measured offline |
 
 ---
 
@@ -541,7 +583,7 @@ Errors are handled at three levels, so the system always returns a result and ne
 uv run python -m pytest -q
 ```
 
-**135 tests, all passing, with no network calls to the model** (`tests/conftest.py` blanks the key and points the cache and decision log at temporary files). Test names include the test case IDs from the traceability table. The same command runs in GitHub Actions on every push, followed by a 20-ticket harness smoke run.
+**136 tests, all passing, with no network calls to the model** (`tests/conftest.py` blanks the key and points the cache and decision log at temporary files). `pyproject.toml` turns off the pytest plugin that `langsmith` (installed with LangChain) registers, because it imports a library Windows Application Control blocks. Test names include the test case IDs from the traceability table. The same command runs in GitHub Actions on every push, followed by a 20-ticket harness smoke run.
 
 | File | Covers |
 |---|---|
@@ -620,7 +662,9 @@ Every component traces back to a requirement, and every requirement traces back 
 - **Free models are slow and rationed.** Fresh answers take about 30 seconds, and the free tier allows 50 requests a day. The cache makes repeat runs free; production would need a paid model.
 - **The pre-send checks catch unsupported claims, not every omission.** Mandatory caveats cover the 14 articles where an omission is costly; elsewhere an answer can still be incomplete (VAL-0025).
 - **The caveats were added after reviewing validation results,** so they are tuned on validation; the hidden test set is where they are confirmed.
-- **About a third of automatic routes disagree with the client's labels.** Manual review shows most of these are label noise (the articles do answer them), but not all.
+- **About 29% of routes disagree with the client's labels.** Manual review shows most of these are label noise (the articles do answer them), but not all: 2 of 18 reviewed replies should have been escalated (VAL-0066, VAL-0072).
+- **Requests for human action phrased as questions can be answered automatically** (written confirmation for a customer's customer; disputing a charge). Proposed keyword fix in [Evaluation](#manual-review-of-automatic-replies); not applied, to avoid tuning on validation again.
+- **Over-automation for non-fluent customers** against their labels (+16 points). See [Fairness](#fairness).
 - **Validation intent accuracy (100%) overstates real accuracy,** because validation reuses development message templates. 94.8% (held out by text) is the honest figure.
 - **The keyword lists were tuned on development tickets.** Validation was used only to confirm (14 of 14 caught).
 - **Exposed-key tickets are escalated on purpose** (DOC-SEC-002 treats an exposed credential as a security event), at the cost of 4 validation tickets the labels say could be answered.
@@ -629,7 +673,8 @@ Every component traces back to a requirement, and every requirement traces back 
 - **Masking and email cleaning are tested only on made-up examples.** No development ticket contains a customer name or a quoted email thread.
 - **Article freshness can't be checked:** every article shows `last_reviewed_days_ago = 0`.
 - **The human queue is a sorted list in the output,** not an agent interface.
-- **The Grafana dashboard needs Docker to run.** Every dashboard query was tested against a live Prometheus scraping the API and a Pushgateway receiving a harness run; the stack itself is started with `docker compose`.
+- **LangGraph and LangChain don't load on Windows with Smart App Control on.** Both need `xxhash`, which is blocked. The system then runs the same graph sequentially (identical decisions, tested); LangGraph runs in WSL, Docker and CI.
+- **The Grafana dashboard needs Docker.** It was run in WSL with Docker Engine, scraping the live API and a Pushgateway receiving a harness run.
 - **Pushed harness metrics are a snapshot per input file.** Each run replaces the previous run's metrics for the same input in the Pushgateway; the `.prom` file and the metrics report keep every run.
 - **The decision log is SQLite.** PostgreSQL in production needs the same table and a database user with INSERT and SELECT only.
 
@@ -661,6 +706,8 @@ Every component traces back to a requirement, and every requirement traces back 
 | 20 | Monitoring with Prometheus (API `/metrics`, Pushgateway for harness runs) and a provisioned Grafana dashboard, alongside the per-run metrics report | Required by the project; the report is the evaluation record, the dashboard is for watching the running system |
 | 21 | Orchestration as a LangGraph state graph whose nodes and edges are defined once as tables, with a sequential runner over the same tables as a fallback | Required by the project. LangGraph's compiled dependencies may be blocked by Windows Application Control, as three other libraries were; the fallback keeps the system running, and both engines are tested to make identical decisions |
 | 22 | The knowledge base is exposed as a LangChain retriever | Required by the project; lets any LangChain or LangGraph component use the 29 articles, with results identical to the direct search |
+| 23 | The system is run and demonstrated in WSL (Ubuntu); `langsmith`'s pytest plugin is turned off | LangGraph and LangChain need `xxhash`, which Windows Application Control blocks, and the `langsmith` plugin stopped pytest from starting. On Windows the fallbacks run with identical decisions; in WSL the real LangGraph engine and Chroma run |
+| 24 | A failed JSON repair that made a fresh model call is reported as a fresh call, not a cached one | The final run showed a 71-second "cached" answer; the label came from the first, cached reply |
 
 ---
 
@@ -673,7 +720,7 @@ Every component traces back to a requirement, and every requirement traces back 
 | 3 | Prompt library: specifications, prompt register PR-01 to PR-08, traceability | Complete; change history to update (PR-02 v1.1; PR-01, PR-03, PR-04 not used at runtime) |
 | 4 | Sprint plan | In progress |
 | — | Build Specification acceptance criteria A1–A12 | Tracked against the build |
-| 5 | Build, evaluation and revised PRD | Build complete; revision log above |
+| 5 | Build, evaluation and revised PRD | Build complete and evaluated; revision log above (entries 1–24) |
 | 6 | Report, video and effort log | Not started |
 
 ---
