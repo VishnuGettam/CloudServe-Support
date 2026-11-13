@@ -193,6 +193,9 @@ def record_decision(result: Any, source: str = "api") -> bool:
         decision_log.record(result, source)
         return True
     except Exception as exc:  # noqa: BLE001 - the ticket's result matters more than its log row
+        from cloudserve_support.observability import count_log_failure
+
+        count_log_failure()
         log.error("decision log write failed for ticket %s: %s",
                   getattr(result, "ticket_id", "?"), str(exc)[:200])
         return False

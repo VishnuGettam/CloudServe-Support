@@ -36,6 +36,7 @@ from pathlib import Path
 import httpx
 
 from cloudserve_support.errors import ModelUnavailable
+from cloudserve_support.observability import count_model_request
 
 log = logging.getLogger(__name__)
 
@@ -105,11 +106,14 @@ class OpenRouterClient:
         key = self.cache_key(system, user, max_tokens)
         hit = self.cache.get(key)
         if hit:
+            count_model_request(hit[0], "cache_hit")
             return LLMResponse(hit[1], hit[0], True, round((time.perf_counter() - started) * 1000, 1))
 
         if not self.api_key or self.api_key == "your_key_here":
+            count_model_request("none", "no_key")
             raise ModelUnavailable("OPENROUTER_API_KEY is not set")
         if self._daily_limit_hit:
+            count_model_request("none", "daily_limit")
             raise ModelUnavailable("daily free-model limit reached earlier in this run")
 
         problems: list[str] = []
@@ -123,8 +127,10 @@ class OpenRouterClient:
                 try:
                     text = self._call(model, system, user, budget)
                 except ModelUnavailable:
+                    count_model_request(model, "daily_limit")
                     raise
                 except RateLimited as exc:
+                    count_model_request(model, "rate_limited")
                     # Free models are shared: the provider behind a model often
                     # rejects requests for a few seconds. Wait and retry the same
                     # model before moving to the next one.
@@ -141,6 +147,7 @@ class OpenRouterClient:
                     )
                     break
                 except OutOfTokens as exc:
+                    count_model_request(model, "out_of_tokens")
                     if attempt < self.retries and budget < MAX_TOKENS_CAP:
                         budget = min(budget * 2, MAX_TOKENS_CAP)
                         log.info("model %s ran out of tokens before answering; retrying with %d", model, budget)
@@ -149,9 +156,11 @@ class OpenRouterClient:
                     log.warning("model %s failed: %s", model, str(exc)[:200])
                     break
                 except Exception as exc:  # noqa: BLE001 - try the next model
+                    count_model_request(model, "error")
                     problems.append(f"{model}: {str(exc)[:160]}")
                     log.warning("model %s failed: %s", model, str(exc)[:200])
                     break
+                count_model_request(model, "ok")
                 self.cache.put(key, model, text)
                 return LLMResponse(text, model, False, round((time.perf_counter() - started) * 1000, 1))
         raise ModelUnavailable("all models failed: " + "; ".join(problems))
