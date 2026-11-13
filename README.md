@@ -2,7 +2,7 @@
 
 An AI-assisted support system for **CloudServe Solutions**, a cloud infrastructure company whose support team is missing its response-time SLA. The system reads each incoming ticket, answers it automatically when it can do so safely and with cited sources, and otherwise hands it to a human with a complete summary attached.
 
-> **Project status (12 November 2026): build complete.** Every functional requirement (FR-01 to FR-12) is built and tested: 124 tests pass with one command. On the 80 validation tickets, 0 of 14 must-never-automate tickets were answered automatically, every automatic reply carries citations and the AI label, and citation accuracy is 100%. See [Evaluation](#evaluation) and [Build status](#build-status).
+> **Project status (13 November 2026): build complete.** Every functional requirement (FR-01 to FR-12) is built and tested: 135 tests pass with one command. The pipeline runs as a **LangGraph** state graph, the knowledge base is a **LangChain** retriever, and the system is monitored with **Prometheus and Grafana**. On the 80 validation tickets, 0 of 14 must-never-automate tickets were answered automatically, every automatic reply carries citations and the AI label, and citation accuracy is 100%. See [Evaluation](#evaluation) and [Build status](#build-status).
 
 ---
 
@@ -82,6 +82,7 @@ flowchart LR
         HAR["Batch harness<br/>--input / --output<br/><i>FR-02</i>"]
     end
 
+    subgraph LG["LangGraph state graph (pipeline/orchestrator.py)"]
     ING["Ingest<br/>validate · clean · mask name<br/><i>FR-01</i>"]
     CLS["Classify<br/>intent · urgency · confidence<br/><i>FR-03</i>"]
     GATE["Policy gate<br/>blocked intents + keywords<br/><i>FR-04</i>"]
@@ -91,6 +92,7 @@ flowchart LR
     VAL{"8 pre-send checks<br/>+ mandatory caveats<br/><i>FR-08</i>"}
     AUTO(["Automatic reply<br/>cited · caveats · AI label"])
     ESC(["Escalation packet<br/>to human queue<br/><i>FR-09</i>"])
+    end
 
     API --> ING
     HAR --> ING
@@ -106,9 +108,10 @@ flowchart LR
 
     subgraph SHARED["Shared services"]
         LOG[("Decision log<br/>SQLite, insert-only<br/><i>FR-10</i>")]
-        KB[("29 help articles<br/>MiniLM + BM25<br/><i>FR-05, FR-12</i>")]
+        KB[("29 help articles<br/>LangChain retriever<br/>MiniLM + BM25<br/><i>FR-05, FR-12</i>")]
         KILL["Kill switch + model fail-safe<br/><i>FR-11</i>"]
         MET["Metrics report + fairness audit<br/><i>A10</i>"]
+        MON["Prometheus + Pushgateway<br/>Grafana dashboard"]
     end
 ```
 
@@ -116,30 +119,51 @@ flowchart LR
 
 | Layer | Contents | Why it is separate |
 |---|---|---|
-| **Application** | FastAPI endpoint, batch harness, pipeline (`graph.py`), policy gate, routing, pre-send checks, caveats, reply formatting | Owns the decision flow and every safety rule |
-| **Model and retrieval** | Classifier, embedding model, vector search, OpenRouter model client with fallback and cache | Can be swapped (another model or vector store) through configuration, without touching the application layer |
-| **Persistence and observability** | Decision log, per-run metrics report and fairness audit, GitHub Actions CI | Every decision is reconstructable and every run is measurable |
+| **Application** | FastAPI endpoint, batch harness, LangGraph pipeline (`orchestrator.py`), policy gate, routing, pre-send checks, caveats, reply formatting | Owns the decision flow and every safety rule |
+| **Model and retrieval** | Classifier, embedding model, LangChain retriever over hybrid search, OpenRouter model client with fallback and cache | Can be swapped (another model or vector store) through configuration, without touching the application layer |
+| **Persistence and observability** | Decision log, Prometheus metrics and Grafana dashboard, per-run metrics report and fairness audit, GitHub Actions CI | Every decision is reconstructable, the running system is watchable, and every run is measurable |
 
 ### Key design decisions
 
 | Decision | Reason |
 |---|---|
+| **The pipeline is a LangGraph state graph, defined once as data.** Nodes (classify, policy, retrieve, route, generate, validate, respond, escalate, kill switch) and the branches between them live in three tables; LangGraph is built from them. | The flow is visible, drawable (`--mermaid`) and easy to extend. If LangGraph can't load (its compiled dependencies may be blocked by Windows Application Control), a sequential runner walks the same tables; both engines are tested to give identical decisions. |
+| **The knowledge base is a LangChain retriever.** | Any LangChain or LangGraph component can use it (`retriever.invoke(...)` returns `Document`s); search results are identical to calling the hybrid retriever directly, which is tested. |
+| **Live monitoring with Prometheus and Grafana, plus a per-run report.** | The API exposes `/metrics`; harness runs push to a Pushgateway; a provisioned Grafana dashboard shows volume, automation, latency by path, model health, check failures, caveats and fairness. The Markdown report stays the evaluation record. |
 | **Safety rules are code, not prompts.** The policy gate, routing, pre-send checks, caveats and kill switch use no language model at all. | A rule such as "never auto-answer a security incident" must not depend on a model following instructions. |
 | **One model call per answered ticket, and none for any other.** Classification, grounding checks and escalation packets are code. | Deterministic decisions (A5), and the free tier allows only 50 model calls a day. |
 | **Classification by nearest-neighbour vote, not a language model.** The 15 most similar labelled development tickets vote on intent and urgency; the winning share becomes a calibrated confidence. | Deterministic, no model calls, and the confidence is measured: held-out intent accuracy 94.8%. |
 | **Honest evaluation: duplicate tickets never cross between training and testing.** | Only 216 of the 500 development ticket texts are unique. A first version scored 99.8% because duplicates leaked into the test folds; grouping by text gave the honest 94.8%. |
 | **Hybrid retrieval** (meaning-based plus keyword search). | Keyword search fails on "my deployment keeps dying" vs "container health check failures". Meaning-based search alone misses exact error codes. Hybrid recall@5 98.9% vs 96.9% keyword-only. |
-| **Only native libraries that run under strict endpoint security.** Embeddings on ONNX Runtime (not PyTorch), vector search in NumPy when Chroma can't load, decision log on Python's built-in `sqlite3` (not SQLAlchemy). | Windows Application Control on the build machine blocked PyTorch, Chroma's gRPC and SQLAlchemy's compiled files. Client machines often have the same controls; turning security off is not an option. |
+| **Every library with compiled parts has a fallback.** Embeddings on ONNX Runtime (not PyTorch); NumPy vector search when Chroma can't load; decision log on built-in `sqlite3` (not SQLAlchemy); sequential runner when LangGraph can't load; direct search when LangChain can't load; metrics off when prometheus-client can't load. | Windows Application Control on the build machine blocked PyTorch, Chroma's gRPC and SQLAlchemy's compiled files. Client machines often have the same controls; turning security off is not an option. |
 | **Every failure degrades, nothing stops.** | No embedding model: keyword search. No model provider: escalate with `MODEL_UNAVAILABLE`. Decision log unwritable: the ticket still gets its result (A11). |
 | **Answers only from the 29 reviewed articles.** Never from agents' private answer files or past replies (FR-12). | Tier 2 reports that private snippets contain answers that have been wrong for two years. |
 | **Mandatory caveats added by code.** | The checks catch unsupported claims but not omitted facts. For 14 articles, the facts a customer must not miss (data loss, access, money, irreversible choices) are appended word for word whenever the article is cited. |
-| **Two front doors, one pipeline.** The API and the harness both call the same `handle()` function. | Live and batch tickets can never behave differently. |
+| **Two front doors, one pipeline.** The API and the harness both call the same `handle()` function, which runs the graph. | Live and batch tickets can never behave differently. |
 | **Thresholds chosen from data, not judgement.** | `eval/retrieval_check.py` set the retrieval threshold (0.30). `eval/threshold_sweep.py` set the confidence threshold (0.80): the lowest value where 99% of automatic answers have the right intent. |
 | **Rules in configuration, versioned.** | `config/never_auto.yaml` (policy) and `config/caveats.yaml` (caveats) carry version numbers recorded with every decision. Changing a rule is a reviewable commit. |
 
 ---
 
 ## How a ticket flows through the system
+
+Each step below is a node in the LangGraph state graph. The diagram is drawn by LangGraph from the compiled graph (`uv run python -m cloudserve_support.pipeline.orchestrator` prints it; a copy is in `docs/pipeline_graph.png`):
+
+```mermaid
+flowchart TD
+    START([START]) -. kill switch on .-> kill_switch
+    START -. otherwise .-> classify
+    classify --> policy --> retrieve --> route
+    route -. automatic .-> generate
+    route -. not automatic .-> escalate
+    generate -. answer drafted .-> validate
+    generate -. model down / not answerable .-> escalate
+    validate -. all checks pass .-> respond
+    validate -. a check failed .-> escalate
+    respond --> END([END])
+    escalate --> END
+    kill_switch --> END
+```
 
 | Step | What happens | Requirement |
 |---|---|---|
@@ -165,7 +189,8 @@ All free and open source, as the brief requires.
 | Language and packaging | Python 3.14 (tested on 3.14.8), managed with [uv](https://docs.astral.sh/uv/) |
 | Data validation | Pydantic v2 |
 | API | FastAPI, served by Uvicorn |
-| Orchestration | A plain Python pipeline (`pipeline/graph.py`), one function per step |
+| Orchestration | LangGraph `StateGraph` (`pipeline/orchestrator.py`), with a sequential fallback over the same node and edge tables |
+| Retrieval interface | LangChain `BaseRetriever` (`pipeline/lc_retriever.py`) over the hybrid search |
 | Classification | Nearest-neighbour vote over TF-IDF similarity, isotonic calibration (scikit-learn) |
 | Language model | OpenRouter free models, through `httpx`: `nvidia/nemotron-3.5-lightning:free` first, Gemma 4 as fallbacks. Configurable. |
 | Embeddings | `all-MiniLM-L6-v2`, run with ONNX Runtime and `tokenizers` |
@@ -173,7 +198,7 @@ All free and open source, as the brief requires.
 | Keyword search | BM25 (`rank-bm25`) |
 | Configuration | YAML (`pyyaml`), `.env` (`python-dotenv`) |
 | Decision log and response cache | SQLite, through Python's built-in `sqlite3` |
-| Monitoring | Per-run metrics report (Markdown and JSON) and fairness audit |
+| Monitoring | Prometheus (`prometheus-client`, API `/metrics`, Pushgateway for harness runs) and Grafana (provisioned dashboard, `monitoring/`); plus a per-run metrics report and fairness audit |
 | Testing and CI | pytest, httpx; GitHub Actions |
 
 ---
@@ -196,15 +221,18 @@ CloudServe-Support/
 │   │   ├── validate.py        the 8 pre-send checks
 │   │   ├── caveats.py         mandatory caveats, checked against the articles at startup
 │   │   ├── escalate.py        escalation packet and human queue
-│   │   └── graph.py           handle() and process(): the pipeline and its error boundary
+│   │   ├── lc_retriever.py    LangChain retriever over the help articles
+│   │   ├── orchestrator.py    the LangGraph state graph: nodes, edges, branches
+│   │   └── graph.py           handle(): error boundary, decision log, metrics
 │   ├── harness/
 │   │   └── __main__.py        batch runner: --input / --output / --resume / --limit
 │   ├── llm.py                 OpenRouter client: fallback, retries, rest after 429s, cache
 │   ├── decision_log.py        insert-only decision log (FR-10)
 │   ├── metrics.py             metrics report and fairness audit (A10)
+│   ├── observability.py       Prometheus metrics
 │   ├── errors.py              error classes, each mapped to a reason code
 │   └── logging_config.py      shared logging setup
-├── tests/                     124 tests (see Testing)
+├── tests/                     135 tests (see Testing)
 ├── eval/
 │   ├── retrieval_check.py     retrieval recall; sets the relevance threshold
 │   └── threshold_sweep.py     sets the routing confidence thresholds
@@ -214,6 +242,8 @@ CloudServe-Support/
 ├── prompts/
 │   └── pr02_generator_v1.md   the answer-writing prompt, PR-02 v1.1
 ├── data/                      development, validation and documentation JSON
+├── monitoring/                Prometheus + Pushgateway + Grafana (docker compose), dashboard JSON
+├── docs/pipeline_graph.*      the pipeline graph, drawn by LangGraph
 ├── .github/workflows/tests.yml  CI: tests and a harness smoke run on every push
 ├── storage/                   response cache and decision log (created at run time, not committed)
 ├── out/                       harness results, queues and metrics (not committed)
@@ -276,6 +306,8 @@ Settings are read from environment variables, or from a `.env` file that is neve
 | `CONFIDENCE_THRESHOLD_SENSITIVE` | Same, for data residency and billing disputes | `0.90` |
 | `DATABASE_URL` | Decision log; empty turns it off | `sqlite:///./storage/decisions.db` |
 | `KILL_SWITCH` | `true` sends every ticket to a human | `false` |
+| `ORCHESTRATOR` | `langgraph`, or `sequential` to run the same graph without LangGraph | `langgraph` |
+| `PUSHGATEWAY_URL` | Where harness runs push their metrics (same as `--pushgateway`) | none |
 | `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING` or `ERROR` | `INFO` |
 
 ---
@@ -298,6 +330,7 @@ uv run python -m cloudserve_support.harness \
 | `--output` | Where to write results. Folders are created if missing. Required. |
 | `--resume` | Continue an interrupted run without redoing finished tickets. |
 | `--limit N` | Process only the first N tickets, for quick checks. |
+| `--pushgateway URL` | Push the run's Prometheus metrics, e.g. `http://localhost:9091` |
 
 Each run writes four files:
 
@@ -306,6 +339,7 @@ Each run writes four files:
 | `<output>.json` | One result per ticket, in input order |
 | `<output>.queue.json` | Escalated tickets in human-queue order |
 | `<output>.metrics.md` / `.metrics.json` | Volume, Business, Technical and Governance metrics, with the fairness audit |
+| `<output>.prom` | The run's Prometheus metrics |
 
 **Guarantees:** no hardcoded paths; exactly one result per input ticket, in input order; one bad ticket never stops the run; progress saved after every ticket; output written atomically; every decision logged.
 
@@ -323,10 +357,44 @@ Then open <http://localhost:8000/docs> to send a ticket from the browser.
 |---|---|
 | `POST /tickets` | Submit one ticket in the dataset schema; returns a `TicketResult` |
 | `GET /health` | Returns `{"status": "ok"}` |
+| `GET /metrics` | Prometheus metrics |
+
+### Monitoring (Prometheus and Grafana)
+
+Needs Docker. From the project folder:
+
+```bash
+cd monitoring
+docker compose up -d                                         # Prometheus :9090, Pushgateway :9091, Grafana :3000
+cd ..
+uv run uvicorn cloudserve_support.app.main:app --port 8000   # live tickets, scraped every 15 s
+uv run python -m cloudserve_support.harness --input data/validation_tickets.json \
+    --output out/validation_results.json --pushgateway http://localhost:9091
+```
+
+Open <http://localhost:3000> → dashboard **CloudServe Support Triage** (login `admin` / `admin`).
+
+| Dashboard row | Panels |
+|---|---|
+| Volume and business | Tickets processed, automation rate, escalations, kill switch, tickets by reason code, live ticket rate by route |
+| Technical | p95 and average processing time by path (no model call, cached, fresh model call, model failed), model requests by outcome (ok, cache hit, rate limited, out of tokens, daily limit, no key, error) and by model |
+| Governance and fairness | Drafts stopped by each check, mandatory caveats added, decision log failures, automation rate by tier and by fluency, pipeline engine in use |
+
+| Metric | Type | Labels |
+|---|---|---|
+| `cloudserve_tickets_total` | counter | route, reason_code, customer_tier, language_fluency |
+| `cloudserve_ticket_latency_seconds` | histogram | path |
+| `cloudserve_model_requests_total` | counter | model, outcome |
+| `cloudserve_check_failures_total` | counter | check |
+| `cloudserve_caveats_added_total` | counter | |
+| `cloudserve_decision_log_failures_total` | counter | |
+| `cloudserve_kill_switch` | gauge | |
+| `cloudserve_orchestrator_info` | gauge | engine |
 
 ### Inspection tools
 
 ```bash
+uv run python -m cloudserve_support.pipeline.orchestrator          # the pipeline graph, drawn by LangGraph (Mermaid)
 uv run python -m cloudserve_support.llm --list-free                 # free models OpenRouter offers now
 uv run python -m cloudserve_support.llm --ping                      # one test request with your key
 uv run python -m cloudserve_support.decision_log --summary          # decision log totals by reason and run
@@ -439,6 +507,8 @@ Errors are handled at three levels, so the system always returns a result and ne
 | Harness | Interrupted (Ctrl+C) | Exit code **130**, progress kept for `--resume` |
 | Anywhere | Decision log can't be written | Error logged; the ticket still gets its result |
 | Startup | A caveat no longer matches its article | Refuses to start the pipeline; every ticket escalates |
+| Startup | LangGraph or LangChain can't be imported | Same graph runs sequentially / retriever called directly; warning logged |
+| Anywhere | Pushgateway unreachable, or prometheus-client missing | Warning logged; the run and its results are unaffected |
 
 **Privacy rule for errors:** error details contain only field names and error types, never ticket text, because they are stored in the decision log.
 
@@ -471,7 +541,7 @@ Errors are handled at three levels, so the system always returns a result and ne
 uv run python -m pytest -q
 ```
 
-**124 tests, all passing, with no network calls to the model** (`tests/conftest.py` blanks the key and points the cache and decision log at temporary files). Test names include the test case IDs from the traceability table. The same command runs in GitHub Actions on every push, followed by a 20-ticket harness smoke run.
+**135 tests, all passing, with no network calls to the model** (`tests/conftest.py` blanks the key and points the cache and decision log at temporary files). Test names include the test case IDs from the traceability table. The same command runs in GitHub Actions on every push, followed by a 20-ticket harness smoke run.
 
 | File | Covers |
 |---|---|
@@ -486,6 +556,8 @@ uv run python -m pytest -q
 | `test_caveats.py` | Caveats must match their articles or startup stops; the VAL-0026 case carries its caveats |
 | `test_decision_log.py` | TC-10-01 to TC-10-04: every decision logged, no personal data, insert-only, a log failure never loses a ticket |
 | `test_metrics.py` | A10: four sections, label-based accuracy and safety, latency paths, fairness against expected rates |
+| `test_orchestration.py` | LangGraph is the default engine; LangGraph and the sequential runner make identical decisions on 40 validation tickets plus an invalid one; fallback when LangGraph can't load; kill-switch branch on both engines; the graph tables are complete; the LangChain retriever returns exactly the direct search results |
+| `test_observability.py` | Tickets counted by route, reason and group; latency recorded by path; model requests counted by outcome; the API serves `/metrics`; the harness writes `.prom` and survives an unreachable Pushgateway |
 
 ---
 
@@ -524,8 +596,10 @@ Every component traces back to a requirement, and every requirement traces back 
 | FR-08 | `pipeline/validate.py`, `pipeline/caveats.py`, `config/caveats.yaml` | none at runtime (PR-04 replaced; revision 12) | TC-08, `test_caveats.py` |
 | FR-09 | `pipeline/escalate.py` | none at runtime (PR-03 replaced; revision 13) | TC-09 |
 | FR-10 | `decision_log.py` | none | TC-10-01 to TC-10-04 |
-| FR-11 | `pipeline/graph.py`, `llm.py` | none | TC-11-01, TC-11-02 |
+| FR-11 | `pipeline/orchestrator.py`, `pipeline/graph.py`, `llm.py` | none | TC-11-01, TC-11-02 |
 | A10 | `metrics.py` | none | `test_metrics.py` |
+| Orchestration | `pipeline/orchestrator.py` (LangGraph), `pipeline/lc_retriever.py` (LangChain) | none | `test_orchestration.py` |
+| Monitoring | `observability.py`, `monitoring/` | none | `test_observability.py` |
 
 ### Targets
 
@@ -555,7 +629,8 @@ Every component traces back to a requirement, and every requirement traces back 
 - **Masking and email cleaning are tested only on made-up examples.** No development ticket contains a customer name or a quoted email thread.
 - **Article freshness can't be checked:** every article shows `last_reviewed_days_ago = 0`.
 - **The human queue is a sorted list in the output,** not an agent interface.
-- **No live dashboards.** Monitoring is a metrics report per run, not Prometheus and Grafana.
+- **The Grafana dashboard needs Docker to run.** Every dashboard query was tested against a live Prometheus scraping the API and a Pushgateway receiving a harness run; the stack itself is started with `docker compose`.
+- **Pushed harness metrics are a snapshot per input file.** Each run replaces the previous run's metrics for the same input in the Pushgateway; the `.prom` file and the metrics report keep every run.
 - **The decision log is SQLite.** PostgreSQL in production needs the same table and a database user with INSERT and SELECT only.
 
 ---
@@ -583,8 +658,9 @@ Every component traces back to a requirement, and every requirement traces back 
 | 17 | One repair attempt when the model's JSON is broken | Failure analysis: 2 of 3 validation check failures were formatting, not content |
 | 18 | Fairness audit compares each group with the rate its own labels call for | Comparing with the overall rate flagged differences in ticket mix, not in treatment |
 | 19 | Mandatory caveats added by code to replies citing 14 articles; each checked word for word against its article at startup | Manual review of VAL-0026: a grounded reply omitted facts a customer signing a contract must know |
-| 20 | Monitoring is a per-run metrics report, not Prometheus and Grafana | The deliverable is batch evaluation (A10); live dashboards are out of scope for the submission |
-| 21 | Orchestration is a plain Python pipeline instead of LangGraph | The flow is linear with one model call; a graph framework added dependencies without adding capability |
+| 20 | Monitoring with Prometheus (API `/metrics`, Pushgateway for harness runs) and a provisioned Grafana dashboard, alongside the per-run metrics report | Required by the project; the report is the evaluation record, the dashboard is for watching the running system |
+| 21 | Orchestration as a LangGraph state graph whose nodes and edges are defined once as tables, with a sequential runner over the same tables as a fallback | Required by the project. LangGraph's compiled dependencies may be blocked by Windows Application Control, as three other libraries were; the fallback keeps the system running, and both engines are tested to make identical decisions |
+| 22 | The knowledge base is exposed as a LangChain retriever | Required by the project; lets any LangChain or LangGraph component use the 29 articles, with results identical to the direct search |
 
 ---
 
