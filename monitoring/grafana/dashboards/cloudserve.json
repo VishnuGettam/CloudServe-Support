@@ -24,7 +24,11 @@
         "w": 24,
         "h": 1
       },
-      "panels": []
+      "panels": [],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
     },
     {
       "id": 2,
@@ -54,7 +58,12 @@
         }
       ],
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
         "overrides": []
       },
       "options": {}
@@ -90,7 +99,11 @@
         "defaults": {
           "unit": "percentunit",
           "min": 0,
-          "max": 1
+          "max": 1,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "green"
+          }
         },
         "overrides": []
       },
@@ -124,7 +137,12 @@
         }
       ],
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
         "overrides": []
       },
       "options": {}
@@ -219,7 +237,12 @@
         }
       ],
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
         "overrides": []
       },
       "options": {
@@ -231,7 +254,7 @@
     {
       "id": 7,
       "type": "timeseries",
-      "title": "Ticket rate by route (live API)",
+      "title": "Live API ticket rate by route (harness runs not included)",
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -274,13 +297,17 @@
         "w": 24,
         "h": 1
       },
-      "panels": []
+      "panels": [],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
     },
     {
       "id": 9,
-      "type": "timeseries",
-      "title": "p95 processing time by path",
-      "description": "no model call / cached answer / fresh model call / model failed. Target p95 < 3 s.",
+      "type": "bargauge",
+      "title": "p95 processing time by path (since start)",
+      "description": "no model call / cached answer / fresh model call / model failed. Target p95 < 3 s. Cumulative, so it covers harness runs too.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -298,18 +325,33 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le, path) (rate(cloudserve_ticket_latency_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, path) (cloudserve_ticket_latency_seconds_bucket))",
           "legendFormat": "{{path}}",
-          "instant": false
+          "instant": true
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "s"
+          "unit": "s",
+          "color": {
+            "mode": "continuous-GrYlRd"
+          },
+          "min": 0
         },
         "overrides": []
       },
-      "options": {}
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
     },
     {
       "id": 10,
@@ -377,7 +419,12 @@
         }
       ],
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
         "overrides": []
       },
       "options": {
@@ -387,7 +434,7 @@
     },
     {
       "id": 12,
-      "type": "bargauge",
+      "type": "stat",
       "title": "Model requests by model",
       "description": "",
       "datasource": {
@@ -413,12 +460,26 @@
         }
       ],
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
         "overrides": []
       },
       "options": {
-        "orientation": "horizontal",
-        "displayMode": "gradient"
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       }
     },
     {
@@ -432,7 +493,11 @@
         "w": 24,
         "h": 1
       },
-      "panels": []
+      "panels": [],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
     },
     {
       "id": 14,
@@ -462,7 +527,12 @@
         }
       ],
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
         "overrides": []
       },
       "options": {
@@ -498,7 +568,12 @@
         }
       ],
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
         "overrides": []
       },
       "options": {}
@@ -581,7 +656,11 @@
         "defaults": {
           "unit": "percentunit",
           "min": 0,
-          "max": 1
+          "max": 1,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "green"
+          }
         },
         "overrides": []
       },
@@ -621,7 +700,11 @@
         "defaults": {
           "unit": "percentunit",
           "min": 0,
-          "max": 1
+          "max": 1,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "green"
+          }
         },
         "overrides": []
       },
