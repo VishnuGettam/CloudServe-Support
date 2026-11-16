@@ -7,6 +7,18 @@ on:
   pull_request:
 
 jobs:
+  secrets:
+    # NFR-04: no credential, key or token anywhere in the repository or its history
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # scan every commit, not just the latest
+      - name: Scan for secrets (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -46,4 +58,3 @@ jobs:
           name: ci-results
           path: out/
           if-no-files-found: ignore
-        
