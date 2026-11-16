@@ -167,6 +167,7 @@ def run(input_path: Path, output_path: Path, resume: bool = False, limit: int | 
     except OSError as exc:
         raise HarnessError(f"cannot write to {output_path.parent}: {exc.strerror}", EXIT_WRITE_FAILED) from exc
 
+    resumed = len(done)
     if done:
         log.info("resuming: %d of %d tickets already processed", len(done), count)
 
@@ -202,7 +203,8 @@ def run(input_path: Path, output_path: Path, resume: bool = False, limit: int | 
 
     elapsed = time.perf_counter() - started
     try:
-        metrics_json, metrics_md = write_report(output_path, results, tickets, elapsed)
+        metrics_json, metrics_md = write_report(output_path, results, tickets, elapsed,
+                                                decision_log_check=_decisions_logged(run_id, count - resumed))
         log.info("metrics report: %s", metrics_md)
     except Exception as exc:  # noqa: BLE001 - results are already written; the report is extra
         log.error("metrics report could not be written: %s", exc)
@@ -218,6 +220,23 @@ def run(input_path: Path, output_path: Path, resume: bool = False, limit: int | 
         if reasons.get(code):
             log.warning("%d tickets escalated with %s; see the log above for details", reasons[code], code)
     return results
+
+
+def _decisions_logged(run_id: str, processed_now: int) -> dict[str, Any] | None:
+    """Rows this run wrote to the decision log, to reconcile against tickets processed (A8)."""
+    try:
+        from cloudserve_support.decision_log import get_decision_log
+
+        decision_log = get_decision_log()
+        if decision_log is None:
+            return {"run_id": run_id, "decisions_logged": None, "tickets_processed_this_run": processed_now,
+                    "reconciles": False, "note": "decision log turned off (DATABASE_URL empty)"}
+        logged = decision_log.count_for_source(run_id)
+        return {"run_id": run_id, "decisions_logged": logged, "tickets_processed_this_run": processed_now,
+                "reconciles": logged == processed_now, "log": decision_log.path}
+    except Exception as exc:  # noqa: BLE001 - the report must still be written
+        log.error("could not count decision log rows: %s", exc)
+        return None
 
 
 def main(argv: list[str] | None = None) -> int:

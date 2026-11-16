@@ -5,11 +5,15 @@ import json
 
 import sqlite3
 
+import yaml
+
 import pytest
 
 import cloudserve_support.decision_log as decision_log
 from cloudserve_support.harness.__main__ import run
 from cloudserve_support.pipeline.graph import handle
+
+POLICY_VERSION = str(yaml.safe_load(open("config/never_auto.yaml", encoding="utf-8"))["version"])
 
 
 def ticket(i=1, **overrides):
@@ -32,7 +36,7 @@ def test_tc_10_01_every_decision_is_logged():
     row = rows[0]
     assert row["route"] == result.route and row["reason_code"] == result.reason_code.value
     assert row["source"] == "api"
-    assert row["input_hash"] and row["policy_version"] == "1.0"
+    assert row["input_hash"] and row["policy_version"] == POLICY_VERSION
     assert row["latency_ms"] is not None and row["intent"]
     assert decision_log.get_decision_log().for_ticket("BAD")[0]["reason_code"] == "INVALID_INPUT"
 

@@ -70,8 +70,32 @@ def latency_path(r: dict[str, Any]) -> str:
 
 # ---------- report ----------
 
+GUARDRAIL_CODES = {"POLICY_BLOCKED", "KEYWORD_BLOCKED", "SENSITIVE_CLASS", "VALIDATION_FAILED", "KILL_SWITCH"}
+
+
+def per_class(pairs: list[tuple[str, str]]) -> dict[str, dict[str, Any]]:
+    """Precision, recall and support for each class, from (true, predicted) pairs."""
+    classes = sorted({t for t, _ in pairs} | {p for _, p in pairs})
+    out = {}
+    for c in classes:
+        tp = sum(t == c and p == c for t, p in pairs)
+        predicted = sum(p == c for _, p in pairs)
+        actual = sum(t == c for t, _ in pairs)
+        out[c] = {"precision": _pct(tp, predicted), "recall": _pct(tp, actual), "support": actual}
+    return out
+
+
+def confusion(pairs: list[tuple[str, str]]) -> tuple[list[str], list[list[int]]]:
+    classes = sorted({t for t, _ in pairs} | {p for _, p in pairs})
+    index = {c: i for i, c in enumerate(classes)}
+    matrix = [[0] * len(classes) for _ in classes]
+    for t, p in pairs:
+        matrix[index[t]][index[p]] += 1
+    return classes, matrix
+
+
 def build_report(results: list[dict[str, Any]], tickets: list[dict[str, Any]] | None = None,
-                 run_seconds: float | None = None) -> dict[str, Any]:
+                 run_seconds: float | None = None, decision_log_check: dict[str, Any] | None = None) -> dict[str, Any]:
     total = len(results)
     auto = [r for r in results if r.get("route") == "auto_respond"]
     escalated = [r for r in results if r.get("route") == "escalate"]
@@ -88,6 +112,10 @@ def build_report(results: list[dict[str, Any]], tickets: list[dict[str, Any]] | 
 
     # ----- Volume -----
     report["volume"] = {
+        "tickets_processed": total,
+        "answered_automatically": len(auto),
+        "escalated": len(escalated),
+        "blocked_by_guardrails": sum(r.get("reason_code") in GUARDRAIL_CODES for r in results),
         "routes": dict(Counter(r.get("route") for r in results)),
         "reason_codes": dict(Counter(r.get("reason_code") for r in results).most_common()),
         "intents": dict(Counter(r.get("intent") or "unknown" for r in results).most_common()),
@@ -97,9 +125,18 @@ def build_report(results: list[dict[str, Any]], tickets: list[dict[str, Any]] | 
 
     # ----- Business -----
     automation = _pct(len(auto), total)
+    response = [r["latency_ms"] / 1000 for r in results if r.get("latency_ms") is not None]
+    auto_response = [r["latency_ms"] / 1000 for r in auto if r.get("latency_ms") is not None]
     business: dict[str, Any] = {
+        # Build Specification: first contact resolution = tickets closed without escalation / all tickets
+        "first_contact_resolution": automation,
         "automation_rate": automation,
         "escalation_rate": _pct(len(escalated), total),
+        # Response time is the system's own processing time: historical tickets are replayed (PRD revision R3)
+        "response_time_mean_seconds": round(sum(response) / len(response), 3) if response else None,
+        "response_time_median_seconds": round(median(response), 3) if response else None,
+        "auto_reply_time_mean_seconds": round(sum(auto_response) / len(auto_response), 3) if auto_response else None,
+        "auto_reply_time_median_seconds": round(median(auto_response), 3) if auto_response else None,
         "tickets_off_human_queue_per_week": round(automation * BASELINE["weekly_tickets"]) if automation is not None else None,
         "auto_first_reply_p95_seconds": (
             round(_percentile([r["latency_ms"] for r in auto if r.get("latency_ms") is not None], 0.95) / 1000, 1)
@@ -137,6 +174,15 @@ def build_report(results: list[dict[str, Any]], tickets: list[dict[str, Any]] | 
     }
     if labelled:
         technical["intent_accuracy"] = _pct(sum(r.get("intent") == labels[r["ticket_id"]].get("intent") for r in labelled), len(labelled))
+        pairs = [(labels[r["ticket_id"]].get("intent") or "unknown", r.get("intent") or "unknown") for r in labelled]
+        classes = per_class(pairs)
+        scored = [v for v in classes.values() if v["precision"] is not None]
+        supported = [v for v in classes.values() if v["support"]]
+        technical["intent_macro_precision"] = round(sum(v["precision"] for v in scored) / len(scored), 4) if scored else None
+        technical["intent_macro_recall"] = round(sum(v["recall"] or 0 for v in supported) / len(supported), 4) if supported else None
+        technical["intent_per_class"] = classes
+        urgency_pairs = [(labels[r["ticket_id"]].get("urgency") or "unknown", r.get("urgency") or "unknown") for r in labelled]
+        technical["urgency_per_class"] = per_class(urgency_pairs)
         technical["urgency_agreement"] = _pct(sum(r.get("urgency") == labels[r["ticket_id"]].get("urgency") for r in labelled), len(labelled))
         technical["route_agreement"] = _pct(sum(r.get("route") == labels[r["ticket_id"]].get("expected_route") for r in labelled), len(labelled))
         with_docs = [r for r in labelled if labels[r["ticket_id"]].get("expected_doc_ids")]
@@ -155,7 +201,13 @@ def build_report(results: list[dict[str, Any]], tickets: list[dict[str, Any]] | 
     report["technical"] = technical
 
     # ----- Governance -----
+    activations = Counter(r.get("reason_code") for r in results if r.get("reason_code") in GUARDRAIL_CODES)
+    activations.update(f"check:{r['failed_check']}" for r in results if r.get("failed_check"))
     governance: dict[str, Any] = {
+        "decisions_logged": (decision_log_check or {}).get("decisions_logged"),
+        "decision_log_reconciles": (decision_log_check or {}).get("reconciles"),
+        "guardrail_activations_by_type": dict(activations.most_common()),
+        "private_data_detections": sum(r.get("failed_check") == "private" for r in results),
         "auto_replies_with_ai_label": _pct(sum(AI_LABEL_MARKER in (r.get("response") or "") for r in auto), len(auto)),
         "auto_replies_with_citation": _pct(sum(bool(r.get("cited_doc_ids")) for r in auto), len(auto)),
         "auto_replies_passing_all_checks": _pct(
@@ -177,6 +229,8 @@ def build_report(results: list[dict[str, Any]], tickets: list[dict[str, Any]] | 
             if r["ticket_id"] in labels and labels[r["ticket_id"]].get("answerable_from_docs") is False]
     governance["fairness"] = fairness(results, labels)
     report["governance"] = governance
+    if decision_log_check:
+        report["decision_log"] = decision_log_check
     return report
 
 
@@ -249,6 +303,14 @@ def to_markdown(report: dict[str, Any], title: str = "Run metrics") -> str:
     out = [f"# {title}", "",
            f"Tickets: **{report['tickets']}** (labelled: {report['labelled_tickets']})"
            + (f" · run time {report['run_seconds']} s" if report.get("run_seconds") is not None else ""), ""]
+    check = report.get("decision_log")
+    if check:
+        out += [f"Decision log: **{check.get('decisions_logged')}** rows written by run `{check.get('run_id')}` for "
+                f"**{check.get('tickets_processed_this_run')}** tickets processed in this run: "
+                + ("reconciles." if check.get("reconciles") else "**does not reconcile**.")
+                + (f" ({check['note']})" if check.get("note") else ""), ""]
+    out += ["Response times are the system's own processing time per ticket: the tickets are historical and are "
+            "replayed, so arrival-to-reply time is not meaningful (PRD revision R3).", ""]
 
     def table(heading: str, rows: dict[str, Any], skip: tuple[str, ...] = ()) -> None:
         out.extend([f"## {heading}", "", "| Measure | Value |", "|---|---|"])
@@ -264,7 +326,16 @@ def to_markdown(report: dict[str, Any], title: str = "Run metrics") -> str:
     out.append("")
     tech = dict(report["technical"])
     paths = tech.pop("latency_by_path")
+    intent_classes = tech.pop("intent_per_class", None)
+    urgency_classes = tech.pop("urgency_per_class", None)
     table("Technical", tech)
+    for title, classes in (("Intent: precision and recall per class", intent_classes),
+                           ("Urgency: precision and recall per class", urgency_classes)):
+        if classes:
+            out.extend([f"### {title}", "", "| Class | Precision | Recall | Support |", "|---|---|---|---|"])
+            for name, v in classes.items():
+                out.append(f"| {name} | {_fmt(v['precision'])} | {_fmt(v['recall'])} | {v['support']} |")
+            out.append("")
     out.extend(["### Latency by path", "", "| Path | Tickets | p50 ms | p95 ms | max ms |", "|---|---|---|---|---|"])
     for name, s in paths.items():
         out.append(f"| {name.replace('_', ' ')} | {s['count']} | {_fmt(s['p50_ms'], 'p50_ms')} | {_fmt(s['p95_ms'], 'p95_ms')} | {_fmt(s['max_ms'], 'max_ms')} |")
@@ -291,12 +362,20 @@ def to_markdown(report: dict[str, Any], title: str = "Run metrics") -> str:
 
 
 def write_report(output: Path, results: list[dict[str, Any]], tickets: list[Any] | None,
-                 run_seconds: float | None = None) -> tuple[Path, Path]:
-    report = build_report(results, [t for t in (tickets or []) if isinstance(t, dict)], run_seconds)
+                 run_seconds: float | None = None, decision_log_check: dict[str, Any] | None = None) -> tuple[Path, Path]:
+    clean = [t for t in (tickets or []) if isinstance(t, dict)]
+    report = build_report(results, clean, run_seconds, decision_log_check)
     json_path = output.with_name(output.stem + ".metrics.json")
     md_path = output.with_name(output.stem + ".metrics.md")
     json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     md_path.write_text(to_markdown(report, f"Run metrics: {output.name}"), encoding="utf-8")
+    labels = {t.get("ticket_id"): t["labels"] for t in clean if isinstance(t.get("labels"), dict)}
+    pairs = [(labels[r["ticket_id"]].get("intent") or "unknown", r.get("intent") or "unknown")
+             for r in results if r.get("ticket_id") in labels]
+    if pairs:  # intent confusion matrix for the report's appendix: rows = true intent, columns = predicted
+        classes, matrix = confusion(pairs)
+        lines = ["true \\ predicted," + ",".join(classes)] + [c + "," + ",".join(map(str, row)) for c, row in zip(classes, matrix)]
+        output.with_name(output.stem + ".confusion.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return json_path, md_path
 
 

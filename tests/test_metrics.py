@@ -98,3 +98,35 @@ def test_fairness_with_labels_compares_each_group_with_its_own_expectation():
     fair = build_report(rows, tickets)["governance"]["fairness"]
     assert fair["flags"] == []
     assert fair["groups"]["customer_tier"]["standard"]["gap_vs_expected"] == 0.0
+
+
+def test_report_has_every_figure_the_build_specification_requires():
+    tickets = [{"ticket_id": "T-1", "labels": {"intent": "billing_query", "urgency": "low", "expected_route": "escalate"}},
+               {"ticket_id": "T-2", "labels": {"intent": "billing_query", "urgency": "low", "expected_route": "auto_respond"}}]
+    report = build_report([result(1, reason="VALIDATION_FAILED", failed_check="private"), result(2, **AUTO)], tickets,
+                          decision_log_check={"decisions_logged": 2, "tickets_processed_this_run": 2, "reconciles": True})
+    v, b, t, g = report["volume"], report["business"], report["technical"], report["governance"]
+    assert (v["tickets_processed"], v["answered_automatically"], v["escalated"], v["blocked_by_guardrails"]) == (2, 1, 1, 1)
+    assert b["first_contact_resolution"] == 0.5 and b["escalation_rate"] == 0.5
+    assert b["response_time_mean_seconds"] is not None and b["response_time_median_seconds"] is not None
+    assert t["intent_per_class"]["billing_query"] == {"precision": 1.0, "recall": 1.0, "support": 2}
+    assert "latency_all" in t and "retrieval_hit_rate" in t
+    assert g["decisions_logged"] == 2 and g["decision_log_reconciles"] is True
+    assert g["guardrail_activations_by_type"] == {"VALIDATION_FAILED": 1, "check:private": 1}
+    assert g["private_data_detections"] == 1
+    assert "Precision" in to_markdown(report) and "reconciles" in to_markdown(report)
+
+
+def test_harness_report_reconciles_with_decision_log_and_writes_confusion_matrix(tmp_path):
+    tickets = [{"ticket_id": f"T-{i}", "channel": "chat", "subject": "", "body": "Our deploy keeps rolling back.",
+                "received_at": "2026-03-14T09:22:00Z", "customer_id": "C", "customer_tier": "business",
+                "customer_region": "europe", "language_fluency": "fluent",
+                "labels": {"intent": "deployment_failure", "urgency": "high", "expected_route": "auto_respond"}}
+               for i in range(3)]
+    src = tmp_path / "in.json"
+    src.write_text(json.dumps(tickets), encoding="utf-8")
+    run(src, tmp_path / "out.json")
+    report = json.loads((tmp_path / "out.metrics.json").read_text())
+    assert report["governance"]["decisions_logged"] == 3
+    assert report["governance"]["decision_log_reconciles"] is True
+    assert (tmp_path / "out.confusion.csv").read_text().startswith("true \\ predicted,")

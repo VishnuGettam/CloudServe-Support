@@ -153,6 +153,10 @@ class DecisionLog:
             out.append(item)
         return out
 
+    def count_for_source(self, source: str) -> int:
+        with self.connect() as db:
+            return db.execute("SELECT COUNT(*) FROM decisions WHERE source = ?", (source[:64],)).fetchone()[0]
+
     def summary(self) -> dict[str, Any]:
         with self.connect() as db:
             total = db.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
