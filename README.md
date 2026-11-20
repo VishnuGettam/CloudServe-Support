@@ -91,7 +91,7 @@ flowchart LR
     RET["Retrieve<br/>hybrid search, top 5<br/><i>FR-05</i>"]
     ROUTE{"Route<br/>data-driven thresholds<br/><i>FR-06</i>"}
     GEN["Generate<br/>cited JSON answer<br/>OpenRouter free model<br/><i>FR-07</i>"]
-    VAL{"8 pre-send checks<br/>+ mandatory caveats<br/><i>FR-08</i>"}
+    VAL{"Validate<br/>8 pre-send checks<br/>+ mandatory caveats<br/><i>FR-08</i>"}
     AUTO(["Automatic reply<br/>cited · caveats · AI label"])
     ESC(["Escalation packet<br/>to human queue<br/><i>FR-09</i>"])
     end
@@ -100,10 +100,9 @@ flowchart LR
     HAR --> ING
     ING -->|invalid| ESC
     ING --> CLS --> GATE
-    GATE -->|blocked| ESC
-    GATE --> RET --> ROUTE
+    GATE -->|"every ticket, blocked or not"| RET --> ROUTE
     ROUTE -->|pass| GEN --> VAL
-    ROUTE -->|fail| ESC
+    ROUTE -->|"blocked by policy gate, or a threshold failed"| ESC
     GEN -->|not answerable / model down| ESC
     VAL -->|pass| AUTO
     VAL -->|fail| ESC
@@ -145,6 +144,19 @@ flowchart LR
 | **Thresholds chosen from data, not judgement.** | `eval/retrieval_check.py` set the retrieval threshold (0.30). `eval/threshold_sweep.py` set the confidence threshold (0.80): the lowest value where 99% of automatic answers have the right intent. |
 | **Rules in configuration, versioned.** | `config/never_auto.yaml` (policy) and `config/caveats.yaml` (caveats) carry version numbers recorded with every decision. Changing a rule is a reviewable commit. |
 
+### Departures from the brief's suggested architecture
+
+The brief calls its architecture "a starting point rather than a specification" and asks for every departure to be explained. These are ours, compared with the brief's low-level component design (Figure 4) and with our own Stage 3 prompt plan:
+
+| Brief / earlier plan | What we built | Why |
+|---|---|---|
+| Classifier chain (few-shot prompt) | Nearest-neighbour vote over TF-IDF similarity against the 500 labelled development tickets, with isotonic calibration (`pipeline/classify.py`). Prompt PR-01 retired. | Deterministic, so the same ticket always gets the same answer (A5). No model call, so classifying 120 tickets does not use up the free tier (about 50 requests a day). The confidence is measured rather than self-reported by a model: calibration within 3.2 points on validation. The model is kept for the one step where it adds value: writing the answer. |
+| Generator chain with citations (LangChain) | Prompt PR-02 v1.1 sent to OpenRouter through our own `httpx` client (`llm.py`), returning JSON with a citation per claim. LangChain is used for the retriever interface (`pipeline/lc_retriever.py`); LangGraph runs the pipeline. | Full control over what the free tier needs: model fallback, rest after 429s, token retry, response cache and one JSON repair. Citations are still required and checked. |
+| PostgreSQL decision log | SQLite through Python's built-in `sqlite3`, insert-only enforced by triggers (`decision_log.py`). | The brief's stack table allows it ("SQLite is fine for the decision log at this scale"). No server to run, and no compiled database driver for Application Control to block (SQLAlchemy was blocked). |
+| Guardrail middleware | Two LangGraph nodes: the policy gate before any model call, and Validate (8 code checks plus mandatory caveats) after the draft. | Guardrails sit in the graph itself, so they cannot be skipped in the demonstration or switched off by a flag. |
+| Model-based validator and escalation writer (our Stage 3 prompts PR-04 and PR-03) | Validate and the escalation packet are plain code. | A model checking a model can be talked round; code cannot. Escalation must work exactly when the model is down. Both save model calls. |
+| MiniLM through sentence-transformers; Chroma only | MiniLM run with ONNX Runtime; Chroma with an in-memory NumPy store as fallback. | PyTorch and Chroma's gRPC were blocked by Application Control on the build machine. Same model and results, no dependency on turning security off. |
+
 ---
 
 ## How a ticket flows through the system
@@ -171,11 +183,11 @@ flowchart TD
 |---|---|---|
 | **1. Ingest** | Validates the ticket against the schema. Email: removes quoted replies and signatures. Tidies whitespace. Replaces the customer's name with `[CUSTOMER]`, so no name reaches an external model. Joins subject and body. Fingerprints the input for the log. | FR-01 |
 | **2. Classify** | The 15 most similar of the 500 labelled development tickets (TF-IDF) vote on intent (one of 22) and urgency. The vote share becomes a calibrated confidence. Records the top three intents. Empty or unmatched text gets `unclear_request`, confidence 0. | FR-03 |
-| **3. Policy gate** | Pure code: (1) the four never-automate intents; (2) a keyword safety net independent of the classifier; (3) tickets of 20 words or fewer that name no product. Flags data residency and billing disputes for a stricter threshold. | FR-04 |
+| **3. Policy gate** | Pure code, before any model call. A blocked ticket still goes through retrieval (so the escalation carries sources) and is escalated at route; it never reaches the model. Rules: (1) the four never-automate intents; (2) a keyword safety net independent of the classifier; (3) tickets of 20 words or fewer that name no product. Flags data residency and billing disputes for a stricter threshold. | FR-04 |
 | **4. Retrieve** | Searches the 29 articles, split at their headings into 116 sections. MiniLM embeddings plus BM25, combined by reciprocal rank fusion. Up to 5 passages, one per article, above the relevance threshold (0.30). Runs for every ticket, so escalations carry sources too. | FR-05 |
-| **5. Route** | Fixed order: policy gate → relevant passage found → sensitive threshold (0.90) → general threshold (0.80). The first that fails gives the reason code. | FR-06 |
+| **5. Route** | Fixed order: blocked by the policy gate → relevant passage found → sensitive threshold (0.90) → general threshold (0.80). The first that fails gives the reason code. | FR-06 |
 | **6. Generate** | Prompt PR-02 v1.1. The model gets the ticket body and the top 3 articles that apply to the customer's plan (filtered in code), and returns JSON: `answerable`, `answer`, and a citation for each claim. If the JSON is broken it is asked once to resend it. Models are tried in order with fallback, and every response is cached. | FR-07 |
-| **7. Check** | Eight code checks, in order: format, citations (only articles given), grounding (each claim matches its article), private data, banned claims (refunds, fixes, dates, asking for credentials), plan, length per channel, tone. The first failure escalates. Then mandatory caveats for the cited articles are added, and the reply is assembled: answer, caveats, sources, AI label. | FR-08 |
+| **7. Validate** | Eight code checks, in order: format, citations (only articles given), grounding (each claim matches its article), private data, banned claims (refunds, fixes, dates, asking for credentials), plan, length per channel, tone. The first failure escalates. Then mandatory caveats for the cited articles are added, and the reply is assembled: answer, caveats, sources, AI label. | FR-08 |
 | **8. Escalate** | Builds the packet in code and places it in the human queue by urgency, tier and age. | FR-09 |
 | **Always** | Every decision is written to the insert-only decision log. | FR-10 |
 | **Always** | Kill switch (`KILL_SWITCH=true`) sends every ticket to a human. Model unavailable: escalate. | FR-11 |
@@ -246,7 +258,11 @@ CloudServe-Support/
 ├── data/                      development, validation and documentation JSON
 ├── examples/                  one ticket per channel, and tickets engineered to trigger guardrails
 ├── monitoring/                Prometheus + Pushgateway + Grafana (docker compose), dashboard JSON
-├── docs/pipeline_graph.*      the pipeline graph, drawn by LangGraph
+├── docs/
+│   ├── pipeline_graph.*       the pipeline graph, drawn by LangGraph
+│   ├── architecture_diagram.excalidraw   all components, code files and tech stack
+│   └── *_diagram.excalidraw   one diagram per step, with real examples: ingest, classification,
+│                              policy_gate, retrieve, route, generate, validate
 ├── .github/workflows/tests.yml  CI on every push: secret scan (gitleaks), tests, harness smoke run
 ├── storage/                   response cache and decision log (created at run time, not committed)
 ├── out/                       harness results, queues and metrics (not committed)
