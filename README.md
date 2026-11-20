@@ -327,7 +327,7 @@ Settings are read from environment variables, or from a `.env` file that is neve
 | `CONFIDENCE_THRESHOLD` | Minimum intent confidence for an automatic answer | `0.80` |
 | `CONFIDENCE_THRESHOLD_SENSITIVE` | Same, for data residency and billing disputes | `0.90` |
 | `DATABASE_URL` | Decision log; empty turns it off | `sqlite:///./storage/decisions.db` |
-| `KILL_SWITCH` | `true` sends every ticket to a human | `false` |
+| `KILL_SWITCH` | `true` sends every ticket to a human (emergency stop; see [Safety](#safety-privacy-and-governance)). Read at start-up: restart the API after changing it | `false` |
 | `ORCHESTRATOR` | `langgraph`, or `sequential` to run the same graph without LangGraph | `langgraph` |
 | `PUSHGATEWAY_URL` | Where harness runs push their metrics (same as `--pushgateway`) | none |
 | `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING` or `ERROR` | `INFO` |
@@ -621,7 +621,8 @@ Errors are handled at three levels, so the system always returns a result and ne
 | AI-drafted replies are labelled | Label added by code to every automatic reply; measured at 100% |
 | Every decision explainable | Decision log: input fingerprint, prediction, confidence, sources, route, reason, model, prompt and policy versions, latency |
 | Past decisions cannot be altered | Database triggers refuse UPDATE and DELETE on the decision log; tested |
-| Fail safe | Model unavailable means escalate; kill switch escalates everything |
+| Fail safe | Model unavailable means escalate. Any unexpected error means escalate with `PIPELINE_ERROR`; nothing crashes. |
+| Kill switch (emergency stop) | `KILL_SWITCH=true` sends every ticket to a human with reason `KILL_SWITCH`: the ticket is still ingested (name masked) and logged, but is not classified, searched or sent to the model. Use it whenever automatic replies cannot be trusted for a while: (1) the model starts giving wrong or strange answers; (2) a security incident, when humans should see every ticket; (3) a help article turns out to be wrong; (4) Support or legal want to review the rules before more replies go out. No code change: set it in `.env` and restart the API (the harness reads it at the start of each run). Set it back to `false` to resume. The Grafana dashboard shows when it is on. |
 | Fairness | Automation and accuracy by tier, region, fluency and channel in every metrics report |
 | Prompt injection | Ticket text placed inside tags and declared as data; output must be strict JSON validated by code; routing decided by code before the model runs |
 | No secrets in the repository | `.env` ignored by git; `.env.example` holds placeholders only; tests and CI run with a blank key; gitleaks scans every push and the whole history |
