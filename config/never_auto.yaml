@@ -1,6 +1,6 @@
 # Policy gate configuration (FR-04). Version-controlled: every change is a
 # commit, and the decision log records which version made each decision.
-version: "1.0"
+version: "1.1"
 
 # Never answered automatically, whatever the classifier's confidence.
 # Source: client labels (must_not_auto_respond) and Stage 1 Disagreement 3.
@@ -74,6 +74,10 @@ product_terms:
   - sign in
   - password
   - mfa
+  - authenticator      # added 16 Nov: DOC-AUTH-002 vocabulary; short chat tickets about MFA codes were escalated as unclear
+  - two-factor
+  - 2fa
+  - verification code
   - sso
   - saml
   - deploy

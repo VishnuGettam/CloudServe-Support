@@ -1,0 +1,35 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	kill_switch(kill_switch)
+	classify(classify)
+	policy(policy)
+	retrieve(retrieve)
+	route(route)
+	generate(generate)
+	validate(validate)
+	respond(respond)
+	escalate(escalate)
+	__end__([<p>__end__</p>]):::last
+	__start__ -.-> classify;
+	__start__ -.-> kill_switch;
+	classify --> policy;
+	generate -.-> escalate;
+	generate -.-> validate;
+	policy --> retrieve;
+	retrieve --> route;
+	route -.-> escalate;
+	route -.-> generate;
+	validate -.-> escalate;
+	validate -.-> respond;
+	escalate --> __end__;
+	kill_switch --> __end__;
+	respond --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
+

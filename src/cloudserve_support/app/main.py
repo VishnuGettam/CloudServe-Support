@@ -1,4 +1,4 @@
-"""FastAPI front door for live tickets (FR-01).
+"""FastAPI front door for live tickets (FR-01), with Prometheus metrics at /metrics.
 
 Error handling:
 - A ticket that fails validation, or a body that is not valid JSON, returns
@@ -16,11 +16,12 @@ from typing import Any
 from fastapi import Body, FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from cloudserve_support.app.schemas import ReasonCode, TicketResult
 from cloudserve_support.errors import describe
 from cloudserve_support.logging_config import setup_logging
+from cloudserve_support.observability import exposition
 from cloudserve_support.pipeline.graph import escalation, handle, warm_up
 
 setup_logging()
@@ -37,7 +38,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="CloudServe Support Triage", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="CloudServe Support Triage", version="1.0.0", lifespan=lifespan)
 
 
 @app.exception_handler(RequestValidationError)
@@ -60,6 +61,13 @@ async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics() -> Response:
+    """Prometheus metrics, for scraping (see monitoring/)."""
+    body, content_type = exposition()
+    return Response(content=body, media_type=content_type)
 
 
 @app.post("/tickets", response_model=TicketResult)

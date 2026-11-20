@@ -145,12 +145,14 @@ def generate(ticket: NormalisedTicket, passages: list[Passage]) -> Draft:
                  ticket.ticket_id, str(first_error)[:120])
         try:
             reply = get_llm().complete(prompt.system, user + REPAIR_NOTE.format(error=str(first_error)[:120]))
-            data = parse(reply.text)
-            draft.model, draft.cached = reply.model, reply.cached
-            draft.latency_ms += reply.latency_ms
         except ModelUnavailable:
             draft.format_error = str(first_error)[:200]
             return draft
+        # The repair reply decides how this draft was produced (cached or fresh), pass or fail.
+        draft.model, draft.cached = reply.model, draft.cached and reply.cached
+        draft.latency_ms += reply.latency_ms
+        try:
+            data = parse(reply.text)
         except (ValueError, json.JSONDecodeError) as exc:
             draft.format_error = f"{str(exc)[:160]} (after one repair attempt)"
             return draft

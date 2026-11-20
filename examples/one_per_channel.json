@@ -1,0 +1,50 @@
+[
+  {
+    "ticket_id": "EX-EMAIL",
+    "channel": "email",
+    "subject": "Invoice higher than expected",
+    "body": "Hello,\n\nOur invoice this month is much higher than last month and we have not changed our plan. Why could that be?\n\nThanks,\nAsha Rao\n\n> On Mon, support wrote:\n> Previous reply quoted here",
+    "customer_id": "CUST-EX-1",
+    "customer_name": "Asha Rao",
+    "customer_tier": "business",
+    "received_at": "2026-11-16T09:00:00Z",
+    "customer_region": "europe",
+    "language_fluency": "fluent"
+  },
+  {
+    "ticket_id": "EX-CHAT",
+    "channel": "chat",
+    "subject": "",
+    "body": "my authenticator app codes are being rejected every time, I've tried generating new ones several times",
+    "customer_id": "CUST-EX-2",
+    "customer_name": "Leo Martin",
+    "customer_tier": "standard",
+    "received_at": "2026-11-16T09:00:00Z",
+    "customer_region": "europe",
+    "language_fluency": "fluent"
+  },
+  {
+    "ticket_id": "EX-DOCS",
+    "channel": "docs_comment",
+    "subject": "Pagination",
+    "body": "How long does a pagination cursor stay valid when iterating a large result set?",
+    "customer_id": "CUST-EX-3",
+    "customer_name": "Mei Chen",
+    "customer_tier": "business",
+    "received_at": "2026-11-16T09:00:00Z",
+    "customer_region": "europe",
+    "language_fluency": "fluent"
+  },
+  {
+    "ticket_id": "EX-FORUM",
+    "channel": "forum",
+    "subject": "Deployment keeps rolling back",
+    "body": "Our container deployment reaches running and then rolls back. The logs show repeated health check timeouts. It works locally.",
+    "customer_id": "CUST-EX-4",
+    "customer_name": "Sam Okafor",
+    "customer_tier": "enterprise",
+    "received_at": "2026-11-16T09:00:00Z",
+    "customer_region": "europe",
+    "language_fluency": "fluent"
+  }
+]

@@ -276,3 +276,17 @@ def test_out_of_tokens_retries_with_a_bigger_allowance(tmp_path, monkeypatch):
     assert client.complete("s", "u").text == "answer"
     assert budgets == [2000, 4000]
     assert client.complete("s", "u").cached  # cached under the original request
+
+
+def test_failed_repair_with_fresh_call_is_not_reported_as_cached(monkeypatch):
+    class Mixed:
+        calls = 0
+
+        def complete(self, system, user, max_tokens=2000):
+            Mixed.calls += 1
+            cached = Mixed.calls == 1  # broken reply from the cache, then a fresh repair call
+            return LLMResponse("still not json", "fake/model:free", cached, 5.0)
+
+    monkeypatch.setattr(gen, "get_llm", lambda: Mixed())
+    r = graph.handle(ticket())
+    assert r.failed_check == "format" and r.cached is False

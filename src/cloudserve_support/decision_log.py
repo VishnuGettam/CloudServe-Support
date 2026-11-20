@@ -153,6 +153,10 @@ class DecisionLog:
             out.append(item)
         return out
 
+    def count_for_source(self, source: str) -> int:
+        with self.connect() as db:
+            return db.execute("SELECT COUNT(*) FROM decisions WHERE source = ?", (source[:64],)).fetchone()[0]
+
     def summary(self) -> dict[str, Any]:
         with self.connect() as db:
             total = db.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
@@ -193,6 +197,9 @@ def record_decision(result: Any, source: str = "api") -> bool:
         decision_log.record(result, source)
         return True
     except Exception as exc:  # noqa: BLE001 - the ticket's result matters more than its log row
+        from cloudserve_support.observability import count_log_failure
+
+        count_log_failure()
         log.error("decision log write failed for ticket %s: %s",
                   getattr(result, "ticket_id", "?"), str(exc)[:200])
         return False

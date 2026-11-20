@@ -13,6 +13,9 @@ Guarantees:
 - Every decision is written to the decision log (FR-10), tagged with this
   run's id, and a metrics report is written next to the output (A10):
   <output>.metrics.json and <output>.metrics.md.
+- Prometheus metrics for the run are written to <output>.prom, and pushed to
+  a Pushgateway when --pushgateway URL (or PUSHGATEWAY_URL) is given, for
+  the Grafana dashboard in monitoring/.
 
 Exit codes:
     0    finished; every ticket has a result
@@ -36,6 +39,7 @@ from typing import Any
 
 from cloudserve_support.logging_config import setup_logging
 from cloudserve_support.metrics import write_report
+from cloudserve_support.observability import export_run
 from cloudserve_support.pipeline.escalate import human_queue
 from cloudserve_support.pipeline.graph import handle, warm_up
 
@@ -141,7 +145,8 @@ def write_atomically(path: Path, results: list[dict[str, Any]]) -> None:
 
 # ---------- run ----------
 
-def run(input_path: Path, output_path: Path, resume: bool = False, limit: int | None = None) -> list[dict[str, Any]]:
+def run(input_path: Path, output_path: Path, resume: bool = False, limit: int | None = None,
+        pushgateway: str | None = None) -> list[dict[str, Any]]:
     if limit is not None and limit < 0:
         raise HarnessError("--limit must be zero or more", EXIT_BAD_INPUT)
     if output_path.resolve() == input_path.resolve():
@@ -162,6 +167,7 @@ def run(input_path: Path, output_path: Path, resume: bool = False, limit: int | 
     except OSError as exc:
         raise HarnessError(f"cannot write to {output_path.parent}: {exc.strerror}", EXIT_WRITE_FAILED) from exc
 
+    resumed = len(done)
     if done:
         log.info("resuming: %d of %d tickets already processed", len(done), count)
 
@@ -197,10 +203,14 @@ def run(input_path: Path, output_path: Path, resume: bool = False, limit: int | 
 
     elapsed = time.perf_counter() - started
     try:
-        metrics_json, metrics_md = write_report(output_path, results, tickets, elapsed)
+        metrics_json, metrics_md = write_report(output_path, results, tickets, elapsed,
+                                                decision_log_check=_decisions_logged(run_id, count - resumed))
         log.info("metrics report: %s", metrics_md)
     except Exception as exc:  # noqa: BLE001 - results are already written; the report is extra
         log.error("metrics report could not be written: %s", exc)
+    prom = export_run(output_path, input_path.stem, pushgateway)
+    if prom:
+        log.info("prometheus metrics: %s", prom)
     reasons = Counter(r["reason_code"] for r in results)
     log.info("done: %d tickets in %.1fs -> %s (human queue: %s)", count, elapsed, output_path,
              output_path.with_name(output_path.stem + ".queue.json"))
@@ -212,6 +222,23 @@ def run(input_path: Path, output_path: Path, resume: bool = False, limit: int | 
     return results
 
 
+def _decisions_logged(run_id: str, processed_now: int) -> dict[str, Any] | None:
+    """Rows this run wrote to the decision log, to reconcile against tickets processed (A8)."""
+    try:
+        from cloudserve_support.decision_log import get_decision_log
+
+        decision_log = get_decision_log()
+        if decision_log is None:
+            return {"run_id": run_id, "decisions_logged": None, "tickets_processed_this_run": processed_now,
+                    "reconciles": False, "note": "decision log turned off (DATABASE_URL empty)"}
+        logged = decision_log.count_for_source(run_id)
+        return {"run_id": run_id, "decisions_logged": logged, "tickets_processed_this_run": processed_now,
+                "reconciles": logged == processed_now, "log": decision_log.path}
+    except Exception as exc:  # noqa: BLE001 - the report must still be written
+        log.error("could not count decision log rows: %s", exc)
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m cloudserve_support.harness",
@@ -221,11 +248,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", required=True, type=Path, help="where to write results")
     parser.add_argument("--resume", action="store_true", help="continue an interrupted run")
     parser.add_argument("--limit", type=int, default=None, help="process only the first N tickets")
+    parser.add_argument("--pushgateway", default=None,
+                        help="Prometheus Pushgateway URL to push the run's metrics to (e.g. http://localhost:9091)")
     args = parser.parse_args(argv)  # bad arguments exit with code 2 automatically
 
     setup_logging()
     try:
-        run(args.input, args.output, resume=args.resume, limit=args.limit)
+        run(args.input, args.output, resume=args.resume, limit=args.limit, pushgateway=args.pushgateway)
     except HarnessError as exc:
         log.error("%s", exc)
         return exc.exit_code

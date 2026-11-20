@@ -2,7 +2,7 @@
 
 An AI-assisted support system for **CloudServe Solutions**, a cloud infrastructure company whose support team is missing its response-time SLA. The system reads each incoming ticket, answers it automatically when it can do so safely and with cited sources, and otherwise hands it to a human with a complete summary attached.
 
-> **Project status (12 November 2026): build complete.** Every functional requirement (FR-01 to FR-12) is built and tested: 124 tests pass with one command. On the 80 validation tickets, 0 of 14 must-never-automate tickets were answered automatically, every automatic reply carries citations and the AI label, and citation accuracy is 100%. See [Evaluation](#evaluation) and [Build status](#build-status).
+> **Project status (16 November 2026): build complete and evaluated; report and video in progress (submission 22 November).** Every functional requirement (FR-01 to FR-12) is built and tested, and every acceptance criterion A1–A12 is mapped to its evidence below: 138 tests pass with one command, and GitHub Actions runs them plus a secret scan on every push. The pipeline runs as a **LangGraph** state graph, the knowledge base is a **LangChain** retriever, and the system is monitored with **Prometheus and Grafana**. On the 80 validation tickets: **66% answered automatically, 0 of 14 must-never-automate tickets answered, 0 invented facts** in a manual review of 18 replies, and every automatic reply carries citations and the AI label. See [Evaluation](#evaluation).
 
 ---
 
@@ -22,10 +22,12 @@ An AI-assisted support system for **CloudServe Solutions**, a cloud infrastructu
 12. [Safety, privacy and governance](#safety-privacy-and-governance)
 13. [Testing](#testing)
 14. [Build status](#build-status)
-15. [Requirements traceability](#requirements-traceability)
-16. [Known limitations](#known-limitations)
-17. [Revision log](#revision-log-changes-since-prd-v10)
-18. [Project documents](#project-documents)
+15. [Acceptance criteria A1–A12](#acceptance-criteria-a1a12)
+16. [Requirements traceability](#requirements-traceability)
+17. [Known limitations](#known-limitations)
+18. [Revision log](#revision-log-changes-since-prd-v10)
+19. [Project documents](#project-documents)
+20. [Attribution](#attribution)
 
 ---
 
@@ -82,33 +84,35 @@ flowchart LR
         HAR["Batch harness<br/>--input / --output<br/><i>FR-02</i>"]
     end
 
+    subgraph LG["LangGraph state graph (pipeline/orchestrator.py)"]
     ING["Ingest<br/>validate · clean · mask name<br/><i>FR-01</i>"]
     CLS["Classify<br/>intent · urgency · confidence<br/><i>FR-03</i>"]
     GATE["Policy gate<br/>blocked intents + keywords<br/><i>FR-04</i>"]
     RET["Retrieve<br/>hybrid search, top 5<br/><i>FR-05</i>"]
     ROUTE{"Route<br/>data-driven thresholds<br/><i>FR-06</i>"}
     GEN["Generate<br/>cited JSON answer<br/>OpenRouter free model<br/><i>FR-07</i>"]
-    VAL{"8 pre-send checks<br/>+ mandatory caveats<br/><i>FR-08</i>"}
+    VAL{"Validate<br/>8 pre-send checks<br/>+ mandatory caveats<br/><i>FR-08</i>"}
     AUTO(["Automatic reply<br/>cited · caveats · AI label"])
     ESC(["Escalation packet<br/>to human queue<br/><i>FR-09</i>"])
+    end
 
     API --> ING
     HAR --> ING
     ING -->|invalid| ESC
     ING --> CLS --> GATE
-    GATE -->|blocked| ESC
-    GATE --> RET --> ROUTE
+    GATE -->|"every ticket, blocked or not"| RET --> ROUTE
     ROUTE -->|pass| GEN --> VAL
-    ROUTE -->|fail| ESC
+    ROUTE -->|"blocked by policy gate, or a threshold failed"| ESC
     GEN -->|not answerable / model down| ESC
     VAL -->|pass| AUTO
     VAL -->|fail| ESC
 
     subgraph SHARED["Shared services"]
         LOG[("Decision log<br/>SQLite, insert-only<br/><i>FR-10</i>")]
-        KB[("29 help articles<br/>MiniLM + BM25<br/><i>FR-05, FR-12</i>")]
+        KB[("29 help articles<br/>LangChain retriever<br/>MiniLM + BM25<br/><i>FR-05, FR-12</i>")]
         KILL["Kill switch + model fail-safe<br/><i>FR-11</i>"]
         MET["Metrics report + fairness audit<br/><i>A10</i>"]
+        MON["Prometheus + Pushgateway<br/>Grafana dashboard"]
     end
 ```
 
@@ -116,41 +120,75 @@ flowchart LR
 
 | Layer | Contents | Why it is separate |
 |---|---|---|
-| **Application** | FastAPI endpoint, batch harness, pipeline (`graph.py`), policy gate, routing, pre-send checks, caveats, reply formatting | Owns the decision flow and every safety rule |
-| **Model and retrieval** | Classifier, embedding model, vector search, OpenRouter model client with fallback and cache | Can be swapped (another model or vector store) through configuration, without touching the application layer |
-| **Persistence and observability** | Decision log, per-run metrics report and fairness audit, GitHub Actions CI | Every decision is reconstructable and every run is measurable |
+| **Application** | FastAPI endpoint, batch harness, LangGraph pipeline (`orchestrator.py`), policy gate, routing, pre-send checks, caveats, reply formatting | Owns the decision flow and every safety rule |
+| **Model and retrieval** | Classifier, embedding model, LangChain retriever over hybrid search, OpenRouter model client with fallback and cache | Can be swapped (another model or vector store) through configuration, without touching the application layer |
+| **Persistence and observability** | Decision log, Prometheus metrics and Grafana dashboard, per-run metrics report and fairness audit, GitHub Actions CI | Every decision is reconstructable, the running system is watchable, and every run is measurable |
 
 ### Key design decisions
 
 | Decision | Reason |
 |---|---|
+| **The pipeline is a LangGraph state graph, defined once as data.** Nodes (classify, policy, retrieve, route, generate, validate, respond, escalate, kill switch) and the branches between them live in three tables; LangGraph is built from them. | The flow is visible, drawable (`--mermaid`) and easy to extend. If LangGraph can't load (its compiled dependencies may be blocked by Windows Application Control), a sequential runner walks the same tables; both engines are tested to give identical decisions. |
+| **The knowledge base is a LangChain retriever.** | Any LangChain or LangGraph component can use it (`retriever.invoke(...)` returns `Document`s); search results are identical to calling the hybrid retriever directly, which is tested. |
+| **Live monitoring with Prometheus and Grafana, plus a per-run report.** | The API exposes `/metrics`; harness runs push to a Pushgateway; a provisioned Grafana dashboard shows volume, automation, latency by path, model health, check failures, caveats and fairness. The Markdown report stays the evaluation record. |
 | **Safety rules are code, not prompts.** The policy gate, routing, pre-send checks, caveats and kill switch use no language model at all. | A rule such as "never auto-answer a security incident" must not depend on a model following instructions. |
-| **One model call per answered ticket, and none for any other.** Classification, grounding checks and escalation packets are code. | Deterministic decisions (A5), and the free tier allows only 50 model calls a day. |
+| **One model call per answered ticket (two if its JSON needs repair), and none for any other.** Classification, grounding checks and escalation packets are code. | Deterministic decisions (A5), and the free tier allows only 50 model calls a day. |
 | **Classification by nearest-neighbour vote, not a language model.** The 15 most similar labelled development tickets vote on intent and urgency; the winning share becomes a calibrated confidence. | Deterministic, no model calls, and the confidence is measured: held-out intent accuracy 94.8%. |
 | **Honest evaluation: duplicate tickets never cross between training and testing.** | Only 216 of the 500 development ticket texts are unique. A first version scored 99.8% because duplicates leaked into the test folds; grouping by text gave the honest 94.8%. |
 | **Hybrid retrieval** (meaning-based plus keyword search). | Keyword search fails on "my deployment keeps dying" vs "container health check failures". Meaning-based search alone misses exact error codes. Hybrid recall@5 98.9% vs 96.9% keyword-only. |
-| **Only native libraries that run under strict endpoint security.** Embeddings on ONNX Runtime (not PyTorch), vector search in NumPy when Chroma can't load, decision log on Python's built-in `sqlite3` (not SQLAlchemy). | Windows Application Control on the build machine blocked PyTorch, Chroma's gRPC and SQLAlchemy's compiled files. Client machines often have the same controls; turning security off is not an option. |
+| **Every library with compiled parts has a fallback.** Embeddings on ONNX Runtime (not PyTorch); NumPy vector search when Chroma can't load; decision log on built-in `sqlite3` (not SQLAlchemy); sequential runner when LangGraph can't load; direct search when LangChain can't load; metrics off when prometheus-client can't load. | Windows Application Control on the build machine blocked PyTorch, Chroma's gRPC and SQLAlchemy's compiled files. Client machines often have the same controls; turning security off is not an option. |
 | **Every failure degrades, nothing stops.** | No embedding model: keyword search. No model provider: escalate with `MODEL_UNAVAILABLE`. Decision log unwritable: the ticket still gets its result (A11). |
 | **Answers only from the 29 reviewed articles.** Never from agents' private answer files or past replies (FR-12). | Tier 2 reports that private snippets contain answers that have been wrong for two years. |
 | **Mandatory caveats added by code.** | The checks catch unsupported claims but not omitted facts. For 14 articles, the facts a customer must not miss (data loss, access, money, irreversible choices) are appended word for word whenever the article is cited. |
-| **Two front doors, one pipeline.** The API and the harness both call the same `handle()` function. | Live and batch tickets can never behave differently. |
+| **Two front doors, one pipeline.** The API and the harness both call the same `handle()` function, which runs the graph. | Live and batch tickets can never behave differently. |
 | **Thresholds chosen from data, not judgement.** | `eval/retrieval_check.py` set the retrieval threshold (0.30). `eval/threshold_sweep.py` set the confidence threshold (0.80): the lowest value where 99% of automatic answers have the right intent. |
 | **Rules in configuration, versioned.** | `config/never_auto.yaml` (policy) and `config/caveats.yaml` (caveats) carry version numbers recorded with every decision. Changing a rule is a reviewable commit. |
+
+### Departures from the brief's suggested architecture
+
+The brief calls its architecture "a starting point rather than a specification" and asks for every departure to be explained. These are ours, compared with the brief's low-level component design (Figure 4) and with our own Stage 3 prompt plan:
+
+| Brief / earlier plan | What we built | Why |
+|---|---|---|
+| Classifier chain (few-shot prompt) | Nearest-neighbour vote over TF-IDF similarity against the 500 labelled development tickets, with isotonic calibration (`pipeline/classify.py`). Prompt PR-01 retired. | Deterministic, so the same ticket always gets the same answer (A5). No model call, so classifying 120 tickets does not use up the free tier (about 50 requests a day). The confidence is measured rather than self-reported by a model: calibration within 3.2 points on validation. The model is kept for the one step where it adds value: writing the answer. |
+| Generator chain with citations (LangChain) | Prompt PR-02 v1.1 sent to OpenRouter through our own `httpx` client (`llm.py`), returning JSON with a citation per claim. LangChain is used for the retriever interface (`pipeline/lc_retriever.py`); LangGraph runs the pipeline. | Full control over what the free tier needs: model fallback, rest after 429s, token retry, response cache and one JSON repair. Citations are still required and checked. |
+| PostgreSQL decision log | SQLite through Python's built-in `sqlite3`, insert-only enforced by triggers (`decision_log.py`). | The brief's stack table allows it ("SQLite is fine for the decision log at this scale"). No server to run, and no compiled database driver for Application Control to block (SQLAlchemy was blocked). |
+| Guardrail middleware | Two LangGraph nodes: the policy gate before any model call, and Validate (8 code checks plus mandatory caveats) after the draft. | Guardrails sit in the graph itself, so they cannot be skipped in the demonstration or switched off by a flag. |
+| Model-based validator and escalation writer (our Stage 3 prompts PR-04 and PR-03) | Validate and the escalation packet are plain code. | A model checking a model can be talked round; code cannot. Escalation must work exactly when the model is down. Both save model calls. |
+| MiniLM through sentence-transformers; Chroma only | MiniLM run with ONNX Runtime; Chroma with an in-memory NumPy store as fallback. | PyTorch and Chroma's gRPC were blocked by Application Control on the build machine. Same model and results, no dependency on turning security off. |
 
 ---
 
 ## How a ticket flows through the system
 
-| Step | What happens | Requirement |
-|---|---|---|
+Each step below is a node in the LangGraph state graph. The diagram is drawn by LangGraph from the compiled graph (`uv run python -m cloudserve_support.pipeline.orchestrator` prints it; a copy is in `docs/pipeline_graph.png`):
+
+```mermaid
+flowchart TD
+    START([START]) -. kill switch on .-> kill_switch
+    START -. otherwise .-> classify
+    classify --> policy --> retrieve --> route
+    route -. automatic .-> generate
+    route -. not automatic .-> escalate
+    generate -. answer drafted .-> validate
+    generate -. model down / not answerable .-> escalate
+    validate -. all checks pass .-> respond
+    validate -. a check failed .-> escalate
+    respond --> END([END])
+    escalate --> END
+    kill_switch --> END
+```
+
+| Step    | What happens | Requirement |
+|-----|---|---|
 | **1. Ingest** | Validates the ticket against the schema. Email: removes quoted replies and signatures. Tidies whitespace. Replaces the customer's name with `[CUSTOMER]`, so no name reaches an external model. Joins subject and body. Fingerprints the input for the log. | FR-01 |
-| **2. Classify** | The 15 most similar of the 500 labelled development tickets (TF-IDF) vote on intent (one of 22) and urgency. The vote share becomes a calibrated confidence. Records the top three intents. Empty or unmatched text gets `unclear_request`, confidence 0. | FR-03 |
-| **3. Policy gate** | Pure code: (1) the four never-automate intents; (2) a keyword safety net independent of the classifier; (3) tickets of 20 words or fewer that name no product. Flags data residency and billing disputes for a stricter threshold. | FR-04 |
-| **4. Retrieve** | Searches the 29 articles, split at their headings into 116 sections. MiniLM embeddings plus BM25, combined by reciprocal rank fusion. Up to 5 passages, one per article, above the relevance threshold (0.30). Runs for every ticket, so escalations carry sources too. | FR-05 |
-| **5. Route** | Fixed order: policy gate → relevant passage found → sensitive threshold (0.90) → general threshold (0.80). The first that fails gives the reason code. | FR-06 |
-| **6. Generate** | Prompt PR-02 v1.1. The model gets the ticket body and the top 3 articles that apply to the customer's plan (filtered in code), and returns JSON: `answerable`, `answer`, and a citation for each claim. If the JSON is broken it is asked once to resend it. Models are tried in order with fallback, and every response is cached. | FR-07 |
-| **7. Check** | Eight code checks, in order: format, citations (only articles given), grounding (each claim matches its article), private data, banned claims (refunds, fixes, dates, asking for credentials), plan, length per channel, tone. The first failure escalates. Then mandatory caveats for the cited articles are added, and the reply is assembled: answer, caveats, sources, AI label. | FR-08 |
-| **8. Escalate** | Builds the packet in code and places it in the human queue by urgency, tier and age. | FR-09 |
+| **2.&nbsp;Classify** | The 15 most similar of the 500 labelled development tickets (TF-IDF) vote on intent (one of 22) and urgency. The vote share becomes a calibrated confidence. Records the top three intents. Empty or unmatched text gets `unclear_request`, confidence 0. | FR-03 |
+| **3.&nbsp;Policy&nbsp;gate**  | Pure code, before any model call. A blocked ticket still goes through retrieval (so the escalation carries sources) and is escalated at route; it never reaches the model. Rules: (1) the four never-automate intents; (2) a keyword safety net independent of the classifier; (3) tickets of 20 words or fewer that name no product. Flags data residency and billing disputes for a stricter threshold. | FR-04 |
+| **4.&nbsp;Retrieve** | Searches the 29 articles, split at their headings into 116 sections. MiniLM embeddings plus BM25, combined by reciprocal rank fusion. Up to 5 passages, one per article, above the relevance threshold (0.30). Runs for every ticket, so escalations carry sources too. | FR-05 |
+| **5. Route** | Fixed order: blocked by the policy gate → relevant passage found → sensitive threshold (0.90) → general threshold (0.80). The first that fails gives the reason code. | FR-06 |
+| **6.&nbsp;Generate** | Prompt PR-02 v1.1. The model gets the ticket body and the top 3 articles that apply to the customer's plan (filtered in code), and returns JSON: `answerable`, `answer`, and a citation for each claim. If the JSON is broken it is asked once to resend it. Models are tried in order with fallback, and every response is cached. | FR-07 |
+| **7.&nbsp;Validate** | Eight code checks, in order: format, citations (only articles given), grounding (each claim matches its article), private data, banned claims (refunds, fixes, dates, asking for credentials), plan, length per channel, tone. The first failure escalates. Then mandatory caveats for the cited articles are added, and the reply is assembled: answer, caveats, sources, AI label. | FR-08 |
+| **8.&nbsp;Escalate** | Builds the packet in code and places it in the human queue by urgency, tier and age. | FR-09 |
 | **Always** | Every decision is written to the insert-only decision log. | FR-10 |
 | **Always** | Kill switch (`KILL_SWITCH=true`) sends every ticket to a human. Model unavailable: escalate. | FR-11 |
 
@@ -165,7 +203,8 @@ All free and open source, as the brief requires.
 | Language and packaging | Python 3.14 (tested on 3.14.8), managed with [uv](https://docs.astral.sh/uv/) |
 | Data validation | Pydantic v2 |
 | API | FastAPI, served by Uvicorn |
-| Orchestration | A plain Python pipeline (`pipeline/graph.py`), one function per step |
+| Orchestration | LangGraph `StateGraph` (`pipeline/orchestrator.py`), with a sequential fallback over the same node and edge tables |
+| Retrieval interface | LangChain `BaseRetriever` (`pipeline/lc_retriever.py`) over the hybrid search |
 | Classification | Nearest-neighbour vote over TF-IDF similarity, isotonic calibration (scikit-learn) |
 | Language model | OpenRouter free models, through `httpx`: `nvidia/nemotron-3.5-lightning:free` first, Gemma 4 as fallbacks. Configurable. |
 | Embeddings | `all-MiniLM-L6-v2`, run with ONNX Runtime and `tokenizers` |
@@ -173,7 +212,7 @@ All free and open source, as the brief requires.
 | Keyword search | BM25 (`rank-bm25`) |
 | Configuration | YAML (`pyyaml`), `.env` (`python-dotenv`) |
 | Decision log and response cache | SQLite, through Python's built-in `sqlite3` |
-| Monitoring | Per-run metrics report (Markdown and JSON) and fairness audit |
+| Monitoring | Prometheus (`prometheus-client`, API `/metrics`, Pushgateway for harness runs) and Grafana (provisioned dashboard, `monitoring/`); plus a per-run metrics report and fairness audit |
 | Testing and CI | pytest, httpx; GitHub Actions |
 
 ---
@@ -196,15 +235,18 @@ CloudServe-Support/
 │   │   ├── validate.py        the 8 pre-send checks
 │   │   ├── caveats.py         mandatory caveats, checked against the articles at startup
 │   │   ├── escalate.py        escalation packet and human queue
-│   │   └── graph.py           handle() and process(): the pipeline and its error boundary
+│   │   ├── lc_retriever.py    LangChain retriever over the help articles
+│   │   ├── orchestrator.py    the LangGraph state graph: nodes, edges, branches
+│   │   └── graph.py           handle(): error boundary, decision log, metrics
 │   ├── harness/
 │   │   └── __main__.py        batch runner: --input / --output / --resume / --limit
 │   ├── llm.py                 OpenRouter client: fallback, retries, rest after 429s, cache
 │   ├── decision_log.py        insert-only decision log (FR-10)
 │   ├── metrics.py             metrics report and fairness audit (A10)
+│   ├── observability.py       Prometheus metrics
 │   ├── errors.py              error classes, each mapped to a reason code
 │   └── logging_config.py      shared logging setup
-├── tests/                     124 tests (see Testing)
+├── tests/                     138 tests (see Testing)
 ├── eval/
 │   ├── retrieval_check.py     retrieval recall; sets the relevance threshold
 │   └── threshold_sweep.py     sets the routing confidence thresholds
@@ -214,7 +256,14 @@ CloudServe-Support/
 ├── prompts/
 │   └── pr02_generator_v1.md   the answer-writing prompt, PR-02 v1.1
 ├── data/                      development, validation and documentation JSON
-├── .github/workflows/tests.yml  CI: tests and a harness smoke run on every push
+├── examples/                  one ticket per channel, and tickets engineered to trigger guardrails
+├── monitoring/                Prometheus + Pushgateway + Grafana (docker compose), dashboard JSON
+├── docs/
+│   ├── pipeline_graph.*       the pipeline graph, drawn by LangGraph
+│   ├── architecture_diagram.excalidraw   all components, code files and tech stack
+│   └── *_diagram.excalidraw   one diagram per step, with real examples: ingest, classification,
+│                              policy_gate, retrieve, route, generate, validate
+├── .github/workflows/tests.yml  CI on every push: secret scan (gitleaks), tests, harness smoke run
 ├── storage/                   response cache and decision log (created at run time, not committed)
 ├── out/                       harness results, queues and metrics (not committed)
 ├── .env.example               configuration template (no secrets)
@@ -245,10 +294,13 @@ cp .env.example .env      # then put your own key in .env, never in .env.example
 
 Run every command from the project folder. Running pytest from a parent folder makes it search the whole drive.
 
+**On Windows, use WSL (Ubuntu).** Windows Application Control (Smart App Control) blocks several compiled libraries this project uses, including `xxhash`, which LangGraph and LangChain need. The system still runs on Windows, using its fallbacks (a sequential engine and direct search, with identical decisions), but LangGraph itself runs only on Linux: WSL, Docker or CI. In WSL, keep the project inside the Linux filesystem (`~/...`, not `/mnt/c` or `/mnt/d`), and delete any `.venv` copied from Windows before running `uv sync`.
+
 ### Check the install
 
 ```bash
-uv run python -m pytest -q                          # 124 passed
+uv run python -m pytest -q                          # 138 passed (3 skip where LangGraph can't load)
+uv run python -m cloudserve_support.pipeline.orchestrator | head -3   # "---" / "config:" = LangGraph running
 uv run python -m cloudserve_support.llm --ping      # one test request with your key
 ```
 
@@ -275,7 +327,9 @@ Settings are read from environment variables, or from a `.env` file that is neve
 | `CONFIDENCE_THRESHOLD` | Minimum intent confidence for an automatic answer | `0.80` |
 | `CONFIDENCE_THRESHOLD_SENSITIVE` | Same, for data residency and billing disputes | `0.90` |
 | `DATABASE_URL` | Decision log; empty turns it off | `sqlite:///./storage/decisions.db` |
-| `KILL_SWITCH` | `true` sends every ticket to a human | `false` |
+| `KILL_SWITCH` | `true` sends every ticket to a human (emergency stop; see [Safety](#safety-privacy-and-governance)). Read at start-up: restart the API after changing it | `false` |
+| `ORCHESTRATOR` | `langgraph`, or `sequential` to run the same graph without LangGraph | `langgraph` |
+| `PUSHGATEWAY_URL` | Where harness runs push their metrics (same as `--pushgateway`) | none |
 | `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING` or `ERROR` | `INFO` |
 
 ---
@@ -298,18 +352,50 @@ uv run python -m cloudserve_support.harness \
 | `--output` | Where to write results. Folders are created if missing. Required. |
 | `--resume` | Continue an interrupted run without redoing finished tickets. |
 | `--limit N` | Process only the first N tickets, for quick checks. |
+| `--pushgateway URL` | Push the run's Prometheus metrics, e.g. `http://localhost:9091` |
 
-Each run writes four files:
+Each run writes these files next to `--output`:
 
 | File | Contents |
 |---|---|
 | `<output>.json` | One result per ticket, in input order |
 | `<output>.queue.json` | Escalated tickets in human-queue order |
 | `<output>.metrics.md` / `.metrics.json` | Volume, Business, Technical and Governance metrics, with the fairness audit |
+| `<output>.prom` | The run's Prometheus metrics |
+| `<output>.confusion.csv` | Intent confusion matrix (rows: labelled intent, columns: predicted), when the input carries labels |
+
+The metrics report contains every figure the Build Specification requires, calculated by the code:
+
+| Group | Figures |
+|---|---|
+| Volume | Tickets processed, answered automatically, escalated, blocked by guardrails; routes, reason codes, intents, urgency, channels |
+| Business | First contact resolution (closed without escalation), mean and median response time, escalation rate, tickets off the human queue per week |
+| Technical | Intent and urgency precision and recall per class, retrieval hit rate, citation accuracy, latency at median and 95th percentile by path |
+| Governance | Decisions logged and whether they **reconcile** with tickets processed in the run, guardrail activations by type, private-data detections, must-never tickets automated, fairness audit |
 
 **Guarantees:** no hardcoded paths; exactly one result per input ticket, in input order; one bad ticket never stops the run; progress saved after every ticket; output written atomically; every decision logged.
 
 > **Running the hidden test set.** Automatic answers need `OPENROUTER_API_KEY`. The free tier allows 50 model requests a day (1,000 after a one-off $10 credit purchase). 120 tickets need roughly 90 requests. If the daily limit is reached, the remaining tickets escalate with `MODEL_UNAVAILABLE`; run the same command again after the limit resets (00:00 UTC), **without** `--resume`: answers already made come from the cache, and only the escalated tickets call the model again.
+
+### Try it: one ticket per channel, and the guardrails
+
+`examples/` holds ready-made tickets for the checks an assessor runs by hand.
+
+```bash
+# one ticket from each channel: email (with a quoted reply and signature to strip), chat, docs comment, forum
+uv run python -m cloudserve_support.harness --input examples/one_per_channel.json --output out/examples_channels.json
+
+# tickets engineered to trigger guardrails: an exposed API key, a suspected account compromise,
+# an unclear request, a prompt injection asking to confirm a refund, and a malformed ticket
+uv run python -m cloudserve_support.harness --input examples/guardrail_tickets.json --output out/examples_guardrails.json
+```
+
+Every guardrail ticket must come back `"route": "escalate"`, never with a `response`: `KEYWORD_BLOCKED` or `POLICY_BLOCKED` for the first four (blocked before any model call), `INVALID_INPUT` for the malformed one. Each file's `_expected` field states the outcome. The same tickets can be sent to the API one at a time:
+
+```bash
+uv run python -c "import json; print(json.dumps(json.load(open('examples/guardrail_tickets.json'))[0]))" > /tmp/ticket.json
+curl -s -X POST localhost:8000/tickets -H "Content-Type: application/json" -d @/tmp/ticket.json
+```
 
 ### API
 
@@ -323,10 +409,44 @@ Then open <http://localhost:8000/docs> to send a ticket from the browser.
 |---|---|
 | `POST /tickets` | Submit one ticket in the dataset schema; returns a `TicketResult` |
 | `GET /health` | Returns `{"status": "ok"}` |
+| `GET /metrics` | Prometheus metrics |
+
+### Monitoring (Prometheus and Grafana)
+
+Needs Docker (on Windows: inside WSL, `sudo apt install docker.io docker-compose-v2`). From the project folder:
+
+```bash
+cd monitoring
+docker compose up -d                                         # Prometheus :9090, Pushgateway :9091, Grafana :3000
+cd ..
+uv run uvicorn cloudserve_support.app.main:app --host 0.0.0.0 --port 8000   # 0.0.0.0 so the Prometheus container can reach it
+uv run python -m cloudserve_support.harness --input data/validation_tickets.json \
+    --output out/validation_results.json --pushgateway http://localhost:9091
+```
+
+Check <http://localhost:9090/targets>: `cloudserve_api` and `pushgateway` should both be **UP**. Then open <http://localhost:3000> → **Dashboards → CloudServe → CloudServe Support Triage** (login `admin` / `admin`). The dashboard adds API and harness tickets together.
+
+| Dashboard row | Panels |
+|---|---|
+| Volume and business | Tickets processed, automation rate, escalations, kill switch, tickets by reason code, live ticket rate by route |
+| Technical | p95 and average processing time by path (no model call, cached, fresh model call, model failed), model requests by outcome (ok, cache hit, rate limited, out of tokens, daily limit, no key, error) and by model |
+| Governance and fairness | Drafts stopped by each check, mandatory caveats added, decision log failures, automation rate by tier and by fluency, pipeline engine in use |
+
+| Metric | Type | Labels |
+|---|---|---|
+| `cloudserve_tickets_total` | counter | route, reason_code, customer_tier, language_fluency |
+| `cloudserve_ticket_latency_seconds` | histogram | path |
+| `cloudserve_model_requests_total` | counter | model, outcome |
+| `cloudserve_check_failures_total` | counter | check |
+| `cloudserve_caveats_added_total` | counter | |
+| `cloudserve_decision_log_failures_total` | counter | |
+| `cloudserve_kill_switch` | gauge | |
+| `cloudserve_orchestrator_info` | gauge | engine |
 
 ### Inspection tools
 
 ```bash
+uv run python -m cloudserve_support.pipeline.orchestrator          # the pipeline graph, drawn by LangGraph (Mermaid)
 uv run python -m cloudserve_support.llm --list-free                 # free models OpenRouter offers now
 uv run python -m cloudserve_support.llm --ping                      # one test request with your key
 uv run python -m cloudserve_support.decision_log --summary          # decision log totals by reason and run
@@ -362,38 +482,79 @@ One `TicketResult` per ticket:
 
 ## Evaluation
 
-All figures are on the 80 validation tickets unless stated. Settings were chosen on the development tickets; validation was used to confirm. *(Run of 12 November; 13 tickets were waiting for the next day's model quota and are being re-run.)*
+Final run of 13 November 2026, on the 80 validation tickets, in WSL with the LangGraph engine and Chroma, policy rules version 1.0. (Policy 1.1, from 16 Nov, changes no validation decision; checked on all 82 inputs.) Settings were chosen on the development tickets; validation was used to confirm. The harness writes the full report to `out/validation_results.metrics.md` (not committed; rerun the command above to reproduce it).
+
+**Validation runs, as the Evaluation Framework asks:** 11 Nov (harness development, no model); 12 Nov (three 10-ticket runs, and one full run cut short by the daily model quota); 13 Nov (the final run reported here); 16 Nov (a confirmation run after the closing changes: 80 of 80 processed, 54 automatic replies, decision log reconciles). The one-ticket difference on 16 Nov is a cached JSON repair: VAL-0014 (roll back a bad release) was answered from DOC-DEPLOY-002 with its data-loss caveat. Manual review found it correct, although its label says escalate; the near-identical VAL-0021 is labelled the other way.
+
+### Results
 
 | Measure | Result |
 |---|---|
 | Must-never-automate tickets answered automatically | **0 of 14** |
-| Automatic replies with citation, AI label and all checks passed | **100%** |
-| Citation accuracy (cited article is one the labels expect) | **100%** |
-| Automation rate | 51% (about 256 tickets a week off the human queue) |
-| Escalations with a complete packet | 100% |
+| Automatic replies with citation, AI label and all checks passed | **100%** (53 of 53) |
+| Automatic replies carrying mandatory caveats | 28 |
+| Automation rate | **66.2%** (53 of 80), about **331 tickets a week** off the human queue |
+| Escalation rate | 33.8%, all with a complete escalation packet |
+| Model unavailable | 0 tickets |
 | Intent accuracy | 94.8% held out on development (validation shows 100%, inflated by reused templates) |
-| Retrieval: expected article found / ranked first | 98% / 96% |
-| Route agreement with the client's labels | 66% (limited by label noise, below) |
-| Urgency agreement | 41% (labels inconsistent; no target set) |
-| Drafts stopped before reaching a customer | 8: the model said the articles don't answer (5); a check failed (3: grounding 1, format 2) |
+| Retrieval: expected article found / ranked first | 98.1% / 96.2% |
+| Citation accuracy | 97.5% measured; **100% after review** (VAL-0080's label expects a health-check article for a dependency-resolution question; the reply cites the right one, DOC-DEPLOY-003) |
+| Route agreement with the client's labels | 71.2% (limited by label noise, below) |
+| Urgency agreement | 41.2% (labels inconsistent; no target set) |
+| Drafts stopped before reaching a customer | 9: the model said the articles don't answer (6); a check failed (3: format 2, grounding 1) |
+| Estimated first contact resolution from automation alone | 48.8% (automatic replies that cite an expected article on an answerable ticket), before any human resolution; baseline 42% |
 
-**Manual review of automatic answers.** 14 of the 41 automatic replies were checked against their articles by hand, including all 9 that the labels mark as "docs cannot answer":
-- 12 correct and grounded. 7 of the 9 flagged tickets are label noise: the articles do answer them (for example VAL-0060, webhook signatures over the raw body, DOC-API-003).
-- 1 accurate but missing the customer's point (VAL-0025: suggests a setting the customer had already changed).
-- 1 grounded but incomplete (VAL-0026, data residency for a contract: left out that metadata is stored centrally). This led to the mandatory caveats.
-- 0 invented facts.
+### Manual review of automatic replies
 
-**Latency** is reported by path, because one number hides the difference:
+18 of the 53 automatic replies were checked against their articles by hand, including all 13 that the labels mark as "docs cannot answer":
 
-| Path | Typical time |
-|---|---|
-| Blocked by policy (no model call) | under 10 ms |
-| Answer from the response cache | under 15 ms |
-| Fresh call to a free model | 29–37 s |
+| Outcome | Replies | Examples |
+|---|---|---|
+| Correct and grounded | 14 | VAL-0060: sign webhooks over the raw body (DOC-API-003). 9 of the 13 flagged tickets are label noise: the articles do answer them |
+| Correct, with one phrase slightly beyond the article | 1 | VAL-0071: says the spend cap can be "disabled"; the article says raised |
+| Accurate but missing the customer's point | 1 | VAL-0025: suggests a setting the customer had already changed |
+| Should have been escalated | 2 | VAL-0066: asks for *written confirmation* of data location to give to their own customer (compliance evidence). VAL-0072: disputes a charge "for a service I do not believe we use" (billing dispute) |
+| **Invented facts** | **0** | |
 
-The 3-second p95 target holds for every path except fresh free-model calls. Free models are shared and slow; a paid model or a dedicated deployment would be needed to meet it in production.
+Both should-have-escalated replies are requests for human action phrased as questions. Proposed fix, not applied (it would mean tuning the keyword rules on validation a second time): blocking phrases for compliance evidence ("written confirmation", "share with our customer", "auditor") and for disputes ("do not believe we use", "not ours").
 
-**Fairness.** Automation rates are compared, for each tier, region, fluency and channel, with the rate that group's own labels call for, so differences in ticket mix are not mistaken for unfairness. Groups more than 15 points below their expected rate are flagged in the metrics report.
+VAL-0026 (data must stay in the EU for a contract) shows the caveat mechanism working: its reply now carries "Metadata … is stored centrally regardless of the data region" and "Migrating … requires a planned migration with support".
+
+### Latency
+
+Reported by path, because one number hides the difference:
+
+| Path | Tickets | p50 | p95 |
+|---|---|---|---|
+| Blocked by policy (no model call) | 19 | 12 ms | 23 ms |
+| Answer from the response cache | 49 | 14 ms | 25 ms |
+| Fresh call to a free model | 12 | 6.1 s | 31.5 s |
+
+The 3-second p95 target holds for every path except fresh free-model calls. Free models are shared and slow; a paid model or a dedicated deployment is needed to meet it in production. Time to first reply for automatic answers is seconds, against 8–12 hours today.
+
+### Fairness
+
+Each group's automation rate is compared with the rate its own labels call for; a gap over 15 points is flagged.
+
+| Group | Automation | Labels expect | Gap |
+|---|---|---|---|
+| Tier: business / enterprise / standard | 90.0% / 75.0% / 47.6% | 70.0% / 75.0% / 50.0% | **+20.0** / 0.0 / −2.4 |
+| Fluency: fluent / non-fluent | 68.8% / 57.9% | 65.6% / 42.1% | +3.3 / **+15.8** |
+| Channel: docs comment (others within 5 points) | 68.8% | 50.0% | **+18.8** |
+| Region (all within 15 points) | 42.9%–72.0% | 42.9%–71.4% | −4.8 to +14.8 |
+
+No group is automated *less* than its tickets call for. The three flags are all *over*-automation against the labels. Most of it is the same "answerable" label noise found in the manual review, but not all: VAL-0066, one of the two replies that should have been escalated, comes from a non-fluent customer ("sorry for my english"). Customers who write less precisely are more likely to have a request for action read as a question, so the non-fluent flag is a real risk, and the place to look first when the policy rules are next revised.
+
+### Against the PRD targets
+
+| Measure | Target | Result |
+|---|---|---|
+| Escalation rate | 40% or below | ✅ 33.8% |
+| Unsafe automatic replies | Zero | ✅ 0 must-never tickets automated, 0 invented facts; 2 replies should have been escalated |
+| Time to first reply (automatic) | Under 5 minutes | ✅ p95 31.5 s on fresh model calls |
+| First contact resolution | 60% or above | Partly: 48.8% from automation alone; human resolution of escalated tickets adds to this but can't be measured offline |
+| Gap between customer groups | Under 5 points | ❌ Raw automation differs by up to 42 points between tiers, mostly because of ticket mix; against each group's own labels, the largest gap is 20 points |
+| Customer satisfaction, repeat contacts | 4.0, about 11% | Can't be measured offline |
 
 ---
 
@@ -439,6 +600,8 @@ Errors are handled at three levels, so the system always returns a result and ne
 | Harness | Interrupted (Ctrl+C) | Exit code **130**, progress kept for `--resume` |
 | Anywhere | Decision log can't be written | Error logged; the ticket still gets its result |
 | Startup | A caveat no longer matches its article | Refuses to start the pipeline; every ticket escalates |
+| Startup | LangGraph or LangChain can't be imported | Same graph runs sequentially / retriever called directly; warning logged |
+| Anywhere | Pushgateway unreachable, or prometheus-client missing | Warning logged; the run and its results are unaffected |
 
 **Privacy rule for errors:** error details contain only field names and error types, never ticket text, because they are stored in the decision log.
 
@@ -458,10 +621,11 @@ Errors are handled at three levels, so the system always returns a result and ne
 | AI-drafted replies are labelled | Label added by code to every automatic reply; measured at 100% |
 | Every decision explainable | Decision log: input fingerprint, prediction, confidence, sources, route, reason, model, prompt and policy versions, latency |
 | Past decisions cannot be altered | Database triggers refuse UPDATE and DELETE on the decision log; tested |
-| Fail safe | Model unavailable means escalate; kill switch escalates everything |
+| Fail safe | Model unavailable means escalate. Any unexpected error means escalate with `PIPELINE_ERROR`; nothing crashes. |
+| Kill switch (emergency stop) | `KILL_SWITCH=true` sends every ticket to a human with reason `KILL_SWITCH`: the ticket is still ingested (name masked) and logged, but is not classified, searched or sent to the model. Use it whenever automatic replies cannot be trusted for a while: (1) the model starts giving wrong or strange answers; (2) a security incident, when humans should see every ticket; (3) a help article turns out to be wrong; (4) Support or legal want to review the rules before more replies go out. No code change: set it in `.env` and restart the API (the harness reads it at the start of each run). Set it back to `false` to resume. The Grafana dashboard shows when it is on. |
 | Fairness | Automation and accuracy by tier, region, fluency and channel in every metrics report |
 | Prompt injection | Ticket text placed inside tags and declared as data; output must be strict JSON validated by code; routing decided by code before the model runs |
-| No secrets in the repository | `.env` ignored by git; `.env.example` holds placeholders only; tests and CI run with a blank key |
+| No secrets in the repository | `.env` ignored by git; `.env.example` holds placeholders only; tests and CI run with a blank key; gitleaks scans every push and the whole history |
 
 ---
 
@@ -471,7 +635,7 @@ Errors are handled at three levels, so the system always returns a result and ne
 uv run python -m pytest -q
 ```
 
-**124 tests, all passing, with no network calls to the model** (`tests/conftest.py` blanks the key and points the cache and decision log at temporary files). Test names include the test case IDs from the traceability table. The same command runs in GitHub Actions on every push, followed by a 20-ticket harness smoke run.
+**138 tests, all passing, with no network calls to the model** (`tests/conftest.py` blanks the key and points the cache and decision log at temporary files). `pyproject.toml` turns off the pytest plugin that `langsmith` (installed with LangChain) registers, because it imports a library Windows Application Control blocks. Test names include the test case IDs from the traceability table. The same command runs in GitHub Actions on every push, after a gitleaks scan of the whole history and before a 20-ticket harness smoke run.
 
 | File | Covers |
 |---|---|
@@ -485,7 +649,9 @@ uv run python -m pytest -q
 | `test_generate.py` | TC-07, TC-08, TC-09, TC-11-01: cited and labelled replies, not-answerable, each check failing when it should, packets, queue order, model fallback, retries, rest after 429s, token retry, JSON repair, cache |
 | `test_caveats.py` | Caveats must match their articles or startup stops; the VAL-0026 case carries its caveats |
 | `test_decision_log.py` | TC-10-01 to TC-10-04: every decision logged, no personal data, insert-only, a log failure never loses a ticket |
-| `test_metrics.py` | A10: four sections, label-based accuracy and safety, latency paths, fairness against expected rates |
+| `test_metrics.py` | A10: every figure the Build Specification requires (per-class precision and recall, mean and median response time, guardrail activations, private-data detections), decision-log reconciliation after a harness run, confusion matrix file, label-based accuracy and safety, latency paths, fairness against expected rates |
+| `test_orchestration.py` | LangGraph is the default engine; LangGraph and the sequential runner make identical decisions on 40 validation tickets plus an invalid one; fallback when LangGraph can't load; kill-switch branch on both engines; the graph tables are complete; the LangChain retriever returns exactly the direct search results |
+| `test_observability.py` | Tickets counted by route, reason and group; latency recorded by path; model requests counted by outcome; the API serves `/metrics`; the harness writes `.prom` and survives an unreachable Pushgateway |
 
 ---
 
@@ -508,6 +674,27 @@ uv run python -m pytest -q
 
 ---
 
+## Acceptance criteria A1–A12
+
+Each criterion from the Build Specification, and where it is met.
+
+| # | Criterion | How this system meets it | Evidence |
+|---|---|---|---|
+| A1 | Runs from a clean checkout by following the README | `uv sync`, `cp .env.example .env`, documented commands; no hardcoded paths; every setting has a default | GitHub Actions builds from a clean checkout on every push; [Getting started](#getting-started) |
+| A2 | All four channels ingested into one representation | `pipeline/ingest.py`: email cleaned of quoted replies and signatures, chat with an empty subject, docs comments and forum posts; one `NormalisedTicket` | `examples/one_per_channel.json`; TC-01-01, TC-01-02 |
+| A3 | Intent and urgency with a numeric confidence | `intent`, `urgency` and `intent_confidence` (0 to 1, calibrated) on every result | TC-03-01 to TC-03-04; calibration within 3.2 points on held-out dev |
+| A4 | Retrieval returns identifiable passages from the corpus, or nothing | `doc_ids`, `retrieval_scores`, and sources with section names in every packet; nothing below the relevance threshold (0.30) | TC-05-01 to TC-05-03; index holds only the 29 articles |
+| A5 | Thresholds set; same input, same decision | τc = 0.80 (0.90 sensitive), τr = 0.30, from documented sweeps; deterministic classifier; model at temperature 0 with a response cache | `test_route.py` determinism; LangGraph and the sequential engine give identical decisions (`test_orchestration.py`) |
+| A6 | Citations resolve to the passages retrieved | Citations check: only articles the model was given; grounding check: each claim matches its cited article | TC-08; citation accuracy 100% after review |
+| A7 | A guardrail blocks when triggered | Policy gate (blocked intents, keyword net, unclear rule) before any model call; 8 pre-send checks after | `examples/guardrail_tickets.json`: all five escalate, none answered |
+| A8 | Every decision in a persistent log with the required fields; log reconciles with tickets | `decision_log.py`: insert-only SQLite, one row per ticket, input fingerprint, prediction, confidence, sources, action, reason, model, prompt and policy versions | Every metrics report states whether logged decisions equal tickets processed (80 of 80); TC-10-01 to TC-10-04 |
+| A9 | Full set in one unattended run, from any input path | `python -m cloudserve_support.harness --input … --output …`; one bad ticket never stops the run; progress saved; `--resume` | 80 of 80 validation tickets, 0 crashes; TC-02-01 to TC-02-04 |
+| A10 | Metrics report produced automatically | `<output>.metrics.md` and `.metrics.json` with every required figure; `<output>.confusion.csv` | `test_metrics.py`; [Batch harness](#batch-harness) |
+| A11 | Degrades without crashing: no retrieval hit, timeout or outage, rate limit, malformed input | No hit: `WEAK_RETRIEVAL`; outage, timeout, daily limit or no key: `MODEL_UNAVAILABLE`; 429s: retry, rest, fallback; malformed: `INVALID_INPUT`; decision log down: result still returned | `test_generate.py`, `test_errors.py`, `test_harness.py`; 13 tickets escalated safely when the quota ran out on 12 Nov |
+| A12 | Tests run with one documented command and pass | `uv run python -m pytest -q` | 138 passed, locally and in CI |
+
+---
+
 ## Requirements traceability
 
 Every component traces back to a requirement, and every requirement traces back to discovery evidence.
@@ -524,8 +711,10 @@ Every component traces back to a requirement, and every requirement traces back 
 | FR-08 | `pipeline/validate.py`, `pipeline/caveats.py`, `config/caveats.yaml` | none at runtime (PR-04 replaced; revision 12) | TC-08, `test_caveats.py` |
 | FR-09 | `pipeline/escalate.py` | none at runtime (PR-03 replaced; revision 13) | TC-09 |
 | FR-10 | `decision_log.py` | none | TC-10-01 to TC-10-04 |
-| FR-11 | `pipeline/graph.py`, `llm.py` | none | TC-11-01, TC-11-02 |
+| FR-11 | `pipeline/orchestrator.py`, `pipeline/graph.py`, `llm.py` | none | TC-11-01, TC-11-02 |
 | A10 | `metrics.py` | none | `test_metrics.py` |
+| Orchestration | `pipeline/orchestrator.py` (LangGraph), `pipeline/lc_retriever.py` (LangChain) | none | `test_orchestration.py` |
+| Monitoring | `observability.py`, `monitoring/` | none | `test_observability.py` |
 
 ### Targets
 
@@ -543,19 +732,24 @@ Every component traces back to a requirement, and every requirement traces back 
 
 ## Known limitations
 
-- **Free models are slow and rationed.** Fresh answers take about 30 seconds, and the free tier allows 50 requests a day. The cache makes repeat runs free; production would need a paid model.
+- **Free models are slow and rationed.** A fresh answer takes about 6 seconds typically and up to 42 seconds (p95 31.5 s), and the free tier allows 50 requests a day. The cache makes repeat runs free; production would need a paid model.
 - **The pre-send checks catch unsupported claims, not every omission.** Mandatory caveats cover the 14 articles where an omission is costly; elsewhere an answer can still be incomplete (VAL-0025).
 - **The caveats were added after reviewing validation results,** so they are tuned on validation; the hidden test set is where they are confirmed.
-- **About a third of automatic routes disagree with the client's labels.** Manual review shows most of these are label noise (the articles do answer them), but not all.
+- **About 29% of routes disagree with the client's labels.** Manual review shows most of these are label noise (the articles do answer them), but not all: 2 of 18 reviewed replies should have been escalated (VAL-0066, VAL-0072).
+- **Requests for human action phrased as questions can be answered automatically** (written confirmation for a customer's customer; disputing a charge). Proposed keyword fix in [Evaluation](#manual-review-of-automatic-replies); not applied, to avoid tuning on validation again.
+- **Over-automation for non-fluent customers** against their labels (+16 points). See [Fairness](#fairness).
 - **Validation intent accuracy (100%) overstates real accuracy,** because validation reuses development message templates. 94.8% (held out by text) is the honest figure.
 - **The keyword lists were tuned on development tickets.** Validation was used only to confirm (14 of 14 caught).
 - **Exposed-key tickets are escalated on purpose** (DOC-SEC-002 treats an exposed credential as a security event), at the cost of 4 validation tickets the labels say could be answered.
 - **Urgency labels are inconsistent** (67 of 78 repeated texts disagree); measured agreement is 41%, which matters because urgency orders the human queue.
 - **Routing accuracy has a ceiling below 100%.** 35 of 78 repeated ticket texts carry different routing labels.
+- **Short tickets that name no product are escalated as unclear (20 words or fewer).** Chat tickets have no subject line, so they reach this limit sooner. The product-term list was widened on 16 Nov with the MFA article's vocabulary after an example chat ticket about authenticator codes was escalated (R27); other short, legitimate chat tickets can still be escalated. This errs towards a human, never towards a wrong answer.
 - **Masking and email cleaning are tested only on made-up examples.** No development ticket contains a customer name or a quoted email thread.
 - **Article freshness can't be checked:** every article shows `last_reviewed_days_ago = 0`.
 - **The human queue is a sorted list in the output,** not an agent interface.
-- **No live dashboards.** Monitoring is a metrics report per run, not Prometheus and Grafana.
+- **LangGraph and LangChain don't load on Windows with Smart App Control on.** Both need `xxhash`, which is blocked. The system then runs the same graph sequentially (identical decisions, tested); LangGraph runs in WSL, Docker and CI.
+- **The Grafana dashboard needs Docker.** It was run in WSL with Docker Engine, scraping the live API and a Pushgateway receiving a harness run.
+- **Pushed harness metrics are a snapshot per input file.** Each run replaces the previous run's metrics for the same input in the Pushgateway; the `.prom` file and the metrics report keep every run.
 - **The decision log is SQLite.** PostgreSQL in production needs the same table and a database user with INSERT and SELECT only.
 
 ---
@@ -575,7 +769,7 @@ Every component traces back to a requirement, and every requirement traces back 
 | 9 | Exposed-key tickets escalated deliberately by the keyword net | DOC-SEC-002 treats an exposed credential as a security event |
 | 10 | No urgency accuracy target | Urgency labels are inconsistent for identical texts |
 | 11 | Model provider changed from Groq to OpenRouter free models | One key reaches several free models, so the client can fall back when one is busy |
-| 12 | Grounding checked by code (word overlap with the cited article) instead of the PR-04 claim-checker model | Deterministic, and costs no model calls against the 50-a-day limit; PR-04 kept for evaluation |
+| 12 | Grounding checked by code (word overlap with the cited article) instead of the PR-04 claim-checker model | Deterministic, and costs no model calls against the 50-a-day limit; PR-04's text is kept in the prompt library |
 | 13 | Escalation packet built by code instead of PR-03 | Escalations cost no model calls and are reproducible |
 | 14 | Generator gets the ticket body only, and only articles for the customer's plan (filtered in code); prompt PR-02 v1.1 | Subjects sometimes contradict bodies; plan rules belong in code; identical bodies share one cached answer |
 | 15 | Fallback models ordered across providers; a model is rested after repeated 429s; reasoning models retried with more tokens | Both Gemma models sat behind one saturated provider; a reasoning model returned empty replies when its tokens ran out |
@@ -583,8 +777,14 @@ Every component traces back to a requirement, and every requirement traces back 
 | 17 | One repair attempt when the model's JSON is broken | Failure analysis: 2 of 3 validation check failures were formatting, not content |
 | 18 | Fairness audit compares each group with the rate its own labels call for | Comparing with the overall rate flagged differences in ticket mix, not in treatment |
 | 19 | Mandatory caveats added by code to replies citing 14 articles; each checked word for word against its article at startup | Manual review of VAL-0026: a grounded reply omitted facts a customer signing a contract must know |
-| 20 | Monitoring is a per-run metrics report, not Prometheus and Grafana | The deliverable is batch evaluation (A10); live dashboards are out of scope for the submission |
-| 21 | Orchestration is a plain Python pipeline instead of LangGraph | The flow is linear with one model call; a graph framework added dependencies without adding capability |
+| 20 | Monitoring with Prometheus (API `/metrics`, Pushgateway for harness runs) and a provisioned Grafana dashboard, alongside the per-run metrics report | Required by the project; the report is the evaluation record, the dashboard is for watching the running system |
+| 21 | Orchestration as a LangGraph state graph whose nodes and edges are defined once as tables, with a sequential runner over the same tables as a fallback | Required by the project. LangGraph's compiled dependencies may be blocked by Windows Application Control, as three other libraries were; the fallback keeps the system running, and both engines are tested to make identical decisions |
+| 22 | The knowledge base is exposed as a LangChain retriever | Required by the project; lets any LangChain or LangGraph component use the 29 articles, with results identical to the direct search |
+| 23 | The system is run and demonstrated in WSL (Ubuntu); `langsmith`'s pytest plugin is turned off | LangGraph and LangChain need `xxhash`, which Windows Application Control blocks, and the `langsmith` plugin stopped pytest from starting. On Windows the fallbacks run with identical decisions; in WSL the real LangGraph engine and Chroma run |
+| 24 | A failed JSON repair that made a fresh model call is reported as a fresh call, not a cached one | The final run showed a 71-second "cached" answer; the label came from the first, cached reply |
+| 25 | Secret scanning (gitleaks, whole history) added to GitHub Actions | PRD v1.0 NFR-04 promised it; the first CI pipeline didn't have it |
+| 26 | Metrics report completed against the Build Specification: per-class precision and recall with a confusion matrix, mean and median response time, guardrail activations by type, private-data detections, and decision-log reconciliation | A check of the report against the Build Specification's required figures, before submission |
+| 27 | Policy rules version 1.1: authenticator, two-factor, 2FA and verification code added to the product terms | A short chat ticket about MFA codes was escalated as unclear. The rule fires on no development or validation ticket, so validation decisions are unchanged (verified on all 82 inputs) |
 
 ---
 
@@ -593,14 +793,23 @@ Every component traces back to a requirement, and every requirement traces back 
 | Stage | Document | Status |
 |---|---|---|
 | 1 | Discovery workbook: interviews, data analysis, problem statement | Complete |
-| 2 | Product requirements document (PRD v1.0): 12 functional and 10 non-functional requirements | Complete |
-| 3 | Prompt library: specifications, prompt register PR-01 to PR-08, traceability | Complete; change history to update (PR-02 v1.1; PR-01, PR-03, PR-04 not used at runtime) |
-| 4 | Sprint plan | In progress |
-| — | Build Specification acceptance criteria A1–A12 | Tracked against the build |
-| 5 | Build, evaluation and revised PRD | Build complete; revision log above |
-| 6 | Report, video and effort log | Not started |
+| 2 | Product requirements document: v1.0 (28 Oct), revised to v1.1 (16 Nov) with results against every success measure | Complete |
+| 3 | Prompt library v1.1: specifications with as-built notes, prompt register PR-01 to PR-08 with change histories, traceability | Complete |
+| 4 | Sprint plan: backlog with definitions of done, the build days as they happened, the final week's plan | Complete (written after the build; noted in the document) |
+| — | Build Specification acceptance criteria A1–A12 | All met; see [Acceptance criteria](#acceptance-criteria-a1a12) |
+| 5 | Build, evaluation and revised PRD | Complete; revision log above (entries 1–27), the same in PRD v1.1 |
+| 6 | Report, video and effort log | In progress, 17–20 November; submission by 22 November |
 
 ---
+
+## Attribution
+
+| Component | Source and licence |
+|---|---|
+| Embedding model `all-MiniLM-L6-v2` | sentence-transformers (Apache 2.0); the ONNX export is Chroma's, downloaded at first run |
+| Libraries | Listed in `pyproject.toml` and `uv.lock`, each under its own open-source licence |
+| Data: tickets, help articles, reference answers | Supplied by the course (CloudServe Solutions is fictional) |
+| Code and documentation drafted with an AI assistant | Claude (Anthropic); every file was reviewed, tested and edited by the author |
 
 ## Acknowledgements
 
