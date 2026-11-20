@@ -179,16 +179,16 @@ flowchart TD
     kill_switch --> END
 ```
 
-| Step | What happens | Requirement |
-|---|---|---|
+| Step    | What happens | Requirement |
+|-----|---|---|
 | **1. Ingest** | Validates the ticket against the schema. Email: removes quoted replies and signatures. Tidies whitespace. Replaces the customer's name with `[CUSTOMER]`, so no name reaches an external model. Joins subject and body. Fingerprints the input for the log. | FR-01 |
-| **2. Classify** | The 15 most similar of the 500 labelled development tickets (TF-IDF) vote on intent (one of 22) and urgency. The vote share becomes a calibrated confidence. Records the top three intents. Empty or unmatched text gets `unclear_request`, confidence 0. | FR-03 |
-| **3. Policy gate** | Pure code, before any model call. A blocked ticket still goes through retrieval (so the escalation carries sources) and is escalated at route; it never reaches the model. Rules: (1) the four never-automate intents; (2) a keyword safety net independent of the classifier; (3) tickets of 20 words or fewer that name no product. Flags data residency and billing disputes for a stricter threshold. | FR-04 |
-| **4. Retrieve** | Searches the 29 articles, split at their headings into 116 sections. MiniLM embeddings plus BM25, combined by reciprocal rank fusion. Up to 5 passages, one per article, above the relevance threshold (0.30). Runs for every ticket, so escalations carry sources too. | FR-05 |
+| **2.&nbsp;Classify** | The 15 most similar of the 500 labelled development tickets (TF-IDF) vote on intent (one of 22) and urgency. The vote share becomes a calibrated confidence. Records the top three intents. Empty or unmatched text gets `unclear_request`, confidence 0. | FR-03 |
+| **3.&nbsp;Policy&nbsp;gate**  | Pure code, before any model call. A blocked ticket still goes through retrieval (so the escalation carries sources) and is escalated at route; it never reaches the model. Rules: (1) the four never-automate intents; (2) a keyword safety net independent of the classifier; (3) tickets of 20 words or fewer that name no product. Flags data residency and billing disputes for a stricter threshold. | FR-04 |
+| **4.&nbsp;Retrieve** | Searches the 29 articles, split at their headings into 116 sections. MiniLM embeddings plus BM25, combined by reciprocal rank fusion. Up to 5 passages, one per article, above the relevance threshold (0.30). Runs for every ticket, so escalations carry sources too. | FR-05 |
 | **5. Route** | Fixed order: blocked by the policy gate → relevant passage found → sensitive threshold (0.90) → general threshold (0.80). The first that fails gives the reason code. | FR-06 |
-| **6. Generate** | Prompt PR-02 v1.1. The model gets the ticket body and the top 3 articles that apply to the customer's plan (filtered in code), and returns JSON: `answerable`, `answer`, and a citation for each claim. If the JSON is broken it is asked once to resend it. Models are tried in order with fallback, and every response is cached. | FR-07 |
-| **7. Validate** | Eight code checks, in order: format, citations (only articles given), grounding (each claim matches its article), private data, banned claims (refunds, fixes, dates, asking for credentials), plan, length per channel, tone. The first failure escalates. Then mandatory caveats for the cited articles are added, and the reply is assembled: answer, caveats, sources, AI label. | FR-08 |
-| **8. Escalate** | Builds the packet in code and places it in the human queue by urgency, tier and age. | FR-09 |
+| **6.&nbsp;Generate** | Prompt PR-02 v1.1. The model gets the ticket body and the top 3 articles that apply to the customer's plan (filtered in code), and returns JSON: `answerable`, `answer`, and a citation for each claim. If the JSON is broken it is asked once to resend it. Models are tried in order with fallback, and every response is cached. | FR-07 |
+| **7.&nbsp;Validate** | Eight code checks, in order: format, citations (only articles given), grounding (each claim matches its article), private data, banned claims (refunds, fixes, dates, asking for credentials), plan, length per channel, tone. The first failure escalates. Then mandatory caveats for the cited articles are added, and the reply is assembled: answer, caveats, sources, AI label. | FR-08 |
+| **8.&nbsp;Escalate** | Builds the packet in code and places it in the human queue by urgency, tier and age. | FR-09 |
 | **Always** | Every decision is written to the insert-only decision log. | FR-10 |
 | **Always** | Kill switch (`KILL_SWITCH=true`) sends every ticket to a human. Model unavailable: escalate. | FR-11 |
 
