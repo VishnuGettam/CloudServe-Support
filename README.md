@@ -226,12 +226,11 @@ All free and open source, as the brief requires.
 ---
 
 ## Project structure
-
 ```
 CloudServe-Support/
 ├── src/cloudserve_support/
 │   ├── app/
-│   │   ├── main.py            FastAPI app: POST /tickets, GET /health
+│   │   ├── main.py            FastAPI app: POST /tickets, GET /health, GET /metrics
 │   │   └── schemas.py         TicketIn, NormalisedTicket, TicketResult, ReasonCode
 │   ├── pipeline/
 │   │   ├── ingest.py          validation, email cleaning, name masking
@@ -247,7 +246,7 @@ CloudServe-Support/
 │   │   ├── orchestrator.py    the LangGraph state graph: nodes, edges, branches
 │   │   └── graph.py           handle(): error boundary, decision log, metrics
 │   ├── harness/
-│   │   └── __main__.py        batch runner: --input / --output / --resume / --limit
+│   │   └── __main__.py        batch runner: --input / --output / --resume / --limit / --pushgateway
 │   ├── llm.py                 OpenRouter client: fallback, retries, rest after 429s, cache
 │   ├── decision_log.py        insert-only decision log (FR-10)
 │   ├── metrics.py             metrics report and fairness audit (A10)
@@ -255,29 +254,32 @@ CloudServe-Support/
 │   ├── errors.py              error classes, each mapped to a reason code
 │   └── logging_config.py      shared logging setup
 ├── tests/                     138 tests (see Testing)
-├── eval/
+├── eval/                      evaluation analysis scripts (the Submission Guide's evaluation/ folder;
+│   │                          the harness is in src/.../harness/ and writes its results to out/)
 │   ├── retrieval_check.py     retrieval recall; sets the relevance threshold
 │   └── threshold_sweep.py     sets the routing confidence thresholds
 ├── config/
 │   ├── never_auto.yaml        policy gate rules (versioned)
 │   └── caveats.yaml           mandatory caveats (versioned)
 ├── prompts/
-│   └── pr02_generator_v1.md   the answer-writing prompt, PR-02 v1.1
+│   └── pr02_generator_v1.md   the answer-writing prompt, PR-02 v1.1 (the only prompt the system uses)
 ├── data/                      development, validation and documentation JSON
 ├── examples/                  one ticket per channel, and tickets engineered to trigger guardrails
 ├── monitoring/                Prometheus + Pushgateway + Grafana (docker compose), dashboard JSON
 ├── docs/
-│   ├── pipeline_graph.*       the pipeline graph, drawn by LangGraph
-│   ├── architecture_diagram.excalidraw   all components, code files and tech stack (+ .png)
-│   └── *_diagram.excalidraw   one diagram per step, with real examples: ingest, classification,
-│                              policy_gate, retrieve, route, generate, validate
+│   ├── architecture_diagram.png   all components, code files and tech stack
+│   ├── pipeline_graph.mmd / .png  the pipeline graph, drawn by LangGraph
+│   └── workflows/             one diagram per step, with real examples:
+│                              1.ingest, 2.classification, 3.policy_gate, 4.retrieve, 5.route,
+│                              6.generate, 7.validate, 8.escalate, 9.decision_log_kill_switch (.png)
 ├── .github/workflows/tests.yml  CI on every push: secret scan (gitleaks), tests, harness smoke run
 ├── storage/                   response cache and decision log (created at run time, not committed)
 ├── out/                       harness results, queues and metrics (not committed)
 ├── .env.example               configuration template (no secrets)
 ├── .python-version
-├── pyproject.toml
-├── uv.lock
+├── pyproject.toml             dependencies (installed with uv sync)
+├── uv.lock                    exact pinned versions
+├── requirements.txt           the same pins exported for pip users (uv export)
 └── README.md
 ```
 
