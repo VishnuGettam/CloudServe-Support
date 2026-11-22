@@ -35,7 +35,11 @@ An AI-assisted support system for **CloudServe Solutions**, a cloud infrastructu
 
 CloudServe receives 500+ support tickets a week through four channels (email, chat, documentation comments and a community forum), handled by six agents. First replies take 8 to 12 hours against a 2-hour SLA, and customer satisfaction is falling.
 
-The client asked for a chatbot. Analysis of 500 historical tickets and five stakeholder interviews showed the real problem is different:
+The client asked for a chatbot. Analysis of 500 historical tickets and five stakeholder interviews showed the real problem is different, So a chatbot that answers everything would make it worse , confident wrong answers to paying customers, and security or billing problems handled by a machine. So I built something narrower: a system that answers only what it can prove
+from the documentation, and hands everything else to a human with the work already
+started.
+
+## Discovery
 
 | Finding | Evidence |
 |---|---|
