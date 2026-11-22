@@ -2,7 +2,7 @@
 
 An AI-assisted support system for **CloudServe Solutions**, a cloud infrastructure company whose support team is missing its response-time SLA. The system reads each incoming ticket, answers it automatically when it can do so safely and with cited sources, and otherwise hands it to a human with a complete summary attached.
 
-> **Project status (16 November 2026): build complete and evaluated; report and video in progress (submission 22 November).** Every functional requirement (FR-01 to FR-12) is built and tested, and every acceptance criterion A1–A12 is mapped to its evidence below: 138 tests pass with one command, and GitHub Actions runs them plus a secret scan on every push. The pipeline runs as a **LangGraph** state graph, the knowledge base is a **LangChain** retriever, and the system is monitored with **Prometheus and Grafana**. On the 80 validation tickets: **66% answered automatically, 0 of 14 must-never-automate tickets answered, 0 invented facts** in a manual review of 18 replies, and every automatic reply carries citations and the AI label. See [Evaluation](#evaluation).
+> **Project status (22 November 2026): build complete, evaluated and submitted.** Every functional requirement (FR-01 to FR-12) is built and tested, and every acceptance criterion A1–A12 is mapped to its evidence below: 138 tests pass with one command, and GitHub Actions runs them plus a secret scan on every push. The pipeline runs as a **LangGraph** state graph, the knowledge base is a **LangChain** retriever, and the system is monitored with **Prometheus and Grafana**. On the 80 validation tickets: **66% answered automatically, 0 of 14 must-never-automate tickets answered, 0 invented facts** in a manual review of 18 replies, and every automatic reply carries citations and the AI label. See [Evaluation](#evaluation).
 
 ---
 
@@ -76,6 +76,10 @@ Escalated tickets are queued by **urgency, then customer tier, then age**, not b
 ---
 
 ## Architecture
+
+![Components, code files and tech stack](docs/architecture_diagram.png)
+
+*Every box names the file that implements it and the functional requirement it meets (editable source: `docs/architecture_diagram.excalidraw`). The flow below is the same pipeline as a diagram GitHub draws.*
 
 ```mermaid
 flowchart LR
@@ -260,7 +264,7 @@ CloudServe-Support/
 ├── monitoring/                Prometheus + Pushgateway + Grafana (docker compose), dashboard JSON
 ├── docs/
 │   ├── pipeline_graph.*       the pipeline graph, drawn by LangGraph
-│   ├── architecture_diagram.excalidraw   all components, code files and tech stack
+│   ├── architecture_diagram.excalidraw   all components, code files and tech stack (+ .png)
 │   └── *_diagram.excalidraw   one diagram per step, with real examples: ingest, classification,
 │                              policy_gate, retrieve, route, generate, validate
 ├── .github/workflows/tests.yml  CI on every push: secret scan (gitleaks), tests, harness smoke run
@@ -484,7 +488,9 @@ One `TicketResult` per ticket:
 
 Final run of 13 November 2026, on the 80 validation tickets, in WSL with the LangGraph engine and Chroma, policy rules version 1.0. (Policy 1.1, from 16 Nov, changes no validation decision; checked on all 82 inputs.) Settings were chosen on the development tickets; validation was used to confirm. The harness writes the full report to `out/validation_results.metrics.md` (not committed; rerun the command above to reproduce it).
 
-**Validation runs, as the Evaluation Framework asks:** 11 Nov (harness development, no model); 12 Nov (three 10-ticket runs, and one full run cut short by the daily model quota); 13 Nov (the final run reported here); 16 Nov (a confirmation run after the closing changes: 80 of 80 processed, 54 automatic replies, decision log reconciles). The one-ticket difference on 16 Nov is a cached JSON repair: VAL-0014 (roll back a bad release) was answered from DOC-DEPLOY-002 with its data-loss caveat. Manual review found it correct, although its label says escalate; the near-identical VAL-0021 is labelled the other way.
+**Validation runs, as the Evaluation Framework asks:** 11 Nov (harness development, no model); 12 Nov (three 10-ticket runs, and one full run cut short by the daily model quota); 13 Nov (the final run reported here); 16 Nov (a confirmation run after the closing changes: 80 of 80 processed, 54 automatic replies, decision log reconciles); 20 and 22 Nov (clean-checkout rehearsals of `main` before recording the video, with no code change). The one-ticket difference on 16 Nov is a cached JSON repair: VAL-0014 (roll back a bad release) was answered from DOC-DEPLOY-002 with its data-loss caveat. Manual review found it correct, although its label says escalate; the near-identical VAL-0021 is labelled the other way.
+
+The two rehearsals started from an empty response cache and ran into the free tier's daily limit part-way through, so they are not used for the business figures: 20 Nov gave 36 automatic replies and 17 `MODEL_UNAVAILABLE`; 22 Nov gave 40 and 15. In both, every decision that does not depend on the model matched the final run (0 of 14 must-never tickets answered, 14 + 4 guardrail blocks, intent accuracy, retrieval hit rates), the tickets that could not reach the model were escalated safely rather than dropped, and the decision log reconciled 80 of 80. They are the practical evidence for the warning under [Batch harness](#batch-harness): a fresh checkout on the free tier may need a second run after the daily reset. The hidden 120-ticket set is run by the assessors; it was never available during the build.
 
 ### Results
 
@@ -798,7 +804,7 @@ Every component traces back to a requirement, and every requirement traces back 
 | 4 | Sprint plan: backlog with definitions of done, the build days as they happened, the final week's plan | Complete (written after the build; noted in the document) |
 | — | Build Specification acceptance criteria A1–A12 | All met; see [Acceptance criteria](#acceptance-criteria-a1a12) |
 | 5 | Build, evaluation and revised PRD | Complete; revision log above (entries 1–27), the same in PRD v1.1 |
-| 6 | Report, video and effort log | In progress, 17–20 November; submission by 22 November |
+| 6 | Report, video and effort log | Complete; in the submission archive (`01_Video`, `02_Report`, `03_Workbooks`), 22 November |
 
 ---
 
