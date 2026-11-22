@@ -2,7 +2,7 @@
 
 An AI-assisted support system for **CloudServe Solutions**, a cloud infrastructure company whose support team is missing its response-time SLA. The system reads each incoming ticket, answers it automatically when it can do so safely and with cited sources, and otherwise hands it to a human with a complete summary attached.
 
-> **Project status (22 November 2026): build complete, evaluated and submitted.** Every functional requirement (FR-01 to FR-12) is built and tested, and every acceptance criterion A1–A12 is mapped to its evidence below: 138 tests pass with one command, and GitHub Actions runs them plus a secret scan on every push. The pipeline runs as a **LangGraph** state graph, the knowledge base is a **LangChain** retriever, and the system is monitored with **Prometheus and Grafana**. On the 80 validation tickets: **66% answered automatically, 0 of 14 must-never-automate tickets answered, 0 invented facts** in a manual review of 18 replies, and every automatic reply carries citations and the AI label. See [Evaluation](#evaluation).
+> **Project status (22 November 2026): build complete, evaluated and submitted.** Every functional requirement (FR-01 to FR-12) is built and tested, and every acceptance criterion A1–A12 is mapped to its evidence below: 138 tests pass with one command, and GitHub Actions runs them plus a secret scan on every push. The pipeline runs as a **LangGraph** state graph, the knowledge base is a **LangChain** retriever, and the system is monitored with **Prometheus and Grafana**. On the 80 validation tickets, latest run (22 November): **0 of 14 must-never-automate tickets answered**, every automatic reply carries citations and the AI label, and **50% answered automatically**, with 15 tickets unable to reach the free model that day; in the 13 November run, where every ticket reached it, **66%**. **0 invented facts** in a manual review of 18 replies. See [Evaluation](#evaluation).
 
 ---
 
@@ -486,33 +486,38 @@ One `TicketResult` per ticket:
 
 ## Evaluation
 
-Final run of 13 November 2026, on the 80 validation tickets, in WSL with the LangGraph engine and Chroma, policy rules version 1.0. (Policy 1.1, from 16 Nov, changes no validation decision; checked on all 82 inputs.) Settings were chosen on the development tickets; validation was used to confirm. The harness writes the full report to `out/validation_results.metrics.md` (not committed; rerun the command above to reproduce it).
+**Latest run: 22 November 2026**, on the 80 validation tickets, from a clean checkout of `main` in WSL, with the LangGraph engine, Chroma and policy rules version 1.1 (run `harness:validation_tickets:20261122T052729Z`, 581.5 s). It is shown beside the **13 November** run, the last run in which every ticket that needed the model reached it. Between the two runs only the policy rules changed, from 1.0 to 1.1, which changes no validation decision (checked on all 82 inputs). Settings were chosen on the development tickets; validation was used to confirm. The harness writes the full report to `out/validation_results.metrics.md` (not committed; rerun the command above to reproduce it).
 
-**Validation runs, as the Evaluation Framework asks:** 11 Nov (harness development, no model); 12 Nov (three 10-ticket runs, and one full run cut short by the daily model quota); 13 Nov (the final run reported here); 16 Nov (a confirmation run after the closing changes: 80 of 80 processed, 54 automatic replies, decision log reconciles); 20 and 22 Nov (clean-checkout rehearsals of `main` before recording the video, with no code change). The one-ticket difference on 16 Nov is a cached JSON repair: VAL-0014 (roll back a bad release) was answered from DOC-DEPLOY-002 with its data-loss caveat. Manual review found it correct, although its label says escalate; the near-identical VAL-0021 is labelled the other way.
+**Read the 22 November figures with one caveat.** The run started from an empty response cache, and the free tier's daily limit was reached part-way through, so **15 tickets could not reach the model** and were escalated with `MODEL_UNAVAILABLE`. The system behaved as designed (escalated safely, nothing dropped, decision log 80 of 80), but those 15 lower the automation rate and raise the escalation rate. Each of the 15 had passed every check before the model, so at most 55 of 80 could have been answered (13 November: 53 answered). The decisions made before the model (guardrail blocks, intent, retrieval) are the same in both runs.
 
-The two rehearsals started from an empty response cache and ran into the free tier's daily limit part-way through, so they are not used for the business figures: 20 Nov gave 36 automatic replies and 17 `MODEL_UNAVAILABLE`; 22 Nov gave 40 and 15. In both, every decision that does not depend on the model matched the final run (0 of 14 must-never tickets answered, 14 + 4 guardrail blocks, intent accuracy, retrieval hit rates), the tickets that could not reach the model were escalated safely rather than dropped, and the decision log reconciled 80 of 80. They are the practical evidence for the warning under [Batch harness](#batch-harness): a fresh checkout on the free tier may need a second run after the daily reset. The hidden 120-ticket set is run by the assessors; it was never available during the build.
+**Validation runs, as the Evaluation Framework asks:** 11 Nov (harness development, no model); 12 Nov (three 10-ticket runs, and one full run cut short by the daily model quota); 13 Nov (complete run, policy 1.0); 16 Nov (confirmation run after the closing changes: 80 of 80 processed, 54 automatic replies, decision log reconciles); 20 Nov (clean-checkout rehearsal: 36 automatic replies, 17 `MODEL_UNAVAILABLE`); **22 Nov (the latest run, reported here)**. The one-ticket difference on 16 Nov is a cached JSON repair: VAL-0014 (roll back a bad release) was answered from DOC-DEPLOY-002 with its data-loss caveat. Manual review found it correct, although its label says escalate; the near-identical VAL-0021 is labelled the other way. The hidden 120-ticket set is run by the assessors; it was never available during the build.
 
 ### Results
 
-| Measure | Result |
-|---|---|
-| Must-never-automate tickets answered automatically | **0 of 14** |
-| Automatic replies with citation, AI label and all checks passed | **100%** (53 of 53) |
-| Automatic replies carrying mandatory caveats | 28 |
-| Automation rate | **66.2%** (53 of 80), about **331 tickets a week** off the human queue |
-| Escalation rate | 33.8%, all with a complete escalation packet |
-| Model unavailable | 0 tickets |
-| Intent accuracy | 94.8% held out on development (validation shows 100%, inflated by reused templates) |
-| Retrieval: expected article found / ranked first | 98.1% / 96.2% |
-| Citation accuracy | 97.5% measured; **100% after review** (VAL-0080's label expects a health-check article for a dependency-resolution question; the reply cites the right one, DOC-DEPLOY-003) |
-| Route agreement with the client's labels | 71.2% (limited by label noise, below) |
-| Urgency agreement | 41.2% (labels inconsistent; no target set) |
-| Drafts stopped before reaching a customer | 9: the model said the articles don't answer (6); a check failed (3: format 2, grounding 1) |
-| Estimated first contact resolution from automation alone | 48.8% (automatic replies that cite an expected article on an answerable ticket), before any human resolution; baseline 42% |
+| Measure | 22 Nov (latest) | 13 Nov (complete run) |
+|---|---|---|
+| Must-never-automate tickets answered automatically | **0 of 14** | **0 of 14** |
+| Blocked by guardrails (policy 14, keyword 4) | 18 | 18 |
+| Automatic replies with citation, AI label and all checks passed | **100%** (40 of 40) | **100%** (53 of 53) |
+| Automatic replies carrying mandatory caveats | 23 | 28 |
+| Automation rate | **50.0%** (40 of 80), about 250 tickets a week off the human queue | **66.2%** (53 of 80), about 331 a week |
+| Escalation rate | 50.0%, of which 15 tickets (18.8 points) are `MODEL_UNAVAILABLE`; **31.2%** without them | 33.8% |
+| Escalations with a complete packet | 100% | 100% |
+| Model unavailable (free-tier daily limit) | **15** | 0 |
+| Intent accuracy | 100% on validation (inflated by reused templates); **94.8% held out on development** | same |
+| Retrieval: expected article found / ranked first | 98.1% / 96.2% | 98.1% / 96.2% |
+| Citation accuracy | **100%** | 97.5% measured; 100% after review (VAL-0080's label expects a health-check article; the reply cites the right one, DOC-DEPLOY-003) |
+| Route agreement with the client's labels | 65.0% | 71.2% |
+| Urgency agreement | 41.2% (labels inconsistent; no target set) | 41.2% |
+| Drafts stopped before reaching a customer | 7: model said the articles don't answer (5); format check failed (2) | 9: articles don't answer (6); a check failed (3) |
+| Estimated first contact resolution from automation alone | 38.8% | 48.8% |
+| Answered although the labels say the docs cannot answer | 9 | 13 (all reviewed by hand, below) |
 
-### Manual review of automatic replies
+The estimated first contact resolution counts automatic replies that cite an expected article on an answerable ticket, before any human resolution; the baseline is 42%.
 
-18 of the 53 automatic replies were checked against their articles by hand, including all 13 that the labels mark as "docs cannot answer":
+### Manual review of automatic replies (13 November run)
+
+18 of the 53 automatic replies of 13 November were checked against their articles by hand, including all 13 that the labels mark as "docs cannot answer". The 9 such replies of 22 November were not reviewed again; VAL-0014, answered from 16 November on, was reviewed then and found correct.
 
 | Outcome | Replies | Examples |
 |---|---|---|
@@ -522,45 +527,51 @@ The two rehearsals started from an empty response cache and ran into the free ti
 | Should have been escalated | 2 | VAL-0066: asks for *written confirmation* of data location to give to their own customer (compliance evidence). VAL-0072: disputes a charge "for a service I do not believe we use" (billing dispute) |
 | **Invented facts** | **0** | |
 
-Both should-have-escalated replies are requests for human action phrased as questions. Proposed fix, not applied (it would mean tuning the keyword rules on validation a second time): blocking phrases for compliance evidence ("written confirmation", "share with our customer", "auditor") and for disputes ("do not believe we use", "not ours").
+Both should-have-escalated replies are requests for human action phrased as questions. Proposed fix, not applied (it would mean tuning the keyword rules on validation a second time): blocking phrases for compliance evidence ("written confirmation", "share with our customer", "auditor") and for disputes ("do not believe we use", "not ours"). On 22 November neither VAL-0066 nor VAL-0072 was answered automatically, but nothing was changed to make that happen, so the risk stands.
 
-VAL-0026 (data must stay in the EU for a contract) shows the caveat mechanism working: its reply now carries "Metadata … is stored centrally regardless of the data region" and "Migrating … requires a planned migration with support".
+VAL-0026 (data must stay in the EU for a contract) shows the caveat mechanism working: its reply carries "Metadata … is stored centrally regardless of the data region" and "Migrating … requires a planned migration with support".
 
 ### Latency
 
-Reported by path, because one number hides the difference:
+Reported by path, because one number hides the difference (22 November):
 
 | Path | Tickets | p50 | p95 |
 |---|---|---|---|
-| Blocked by policy (no model call) | 19 | 12 ms | 23 ms |
-| Answer from the response cache | 49 | 14 ms | 25 ms |
-| Fresh call to a free model | 12 | 6.1 s | 31.5 s |
+| No model call (blocked, or escalated before generate) | 19 | 20 ms | 31 ms |
+| Answer from the response cache | 8 | 29 ms | 44 ms |
+| Fresh call to a free model | 38 | 7.9 s | 45.7 s |
+| Model unavailable (escalated) | 15 | 28 ms | 17.3 s |
 
-The 3-second p95 target holds for every path except fresh free-model calls. Free models are shared and slow; a paid model or a dedicated deployment is needed to meet it in production. Time to first reply for automatic answers is seconds, against 8–12 hours today.
+Automatic first reply p95: **26.9 s** (13 November: 31.5 s). The 3-second p95 target holds for every path except fresh free-model calls. Free models are shared and slow; a paid model or a dedicated deployment is needed to meet it in production. Time to first reply for automatic answers is seconds, against 8–12 hours today.
 
 ### Fairness
 
 Each group's automation rate is compared with the rate its own labels call for; a gap over 15 points is flagged.
 
-| Group | Automation | Labels expect | Gap |
-|---|---|---|---|
-| Tier: business / enterprise / standard | 90.0% / 75.0% / 47.6% | 70.0% / 75.0% / 50.0% | **+20.0** / 0.0 / −2.4 |
-| Fluency: fluent / non-fluent | 68.8% / 57.9% | 65.6% / 42.1% | +3.3 / **+15.8** |
-| Channel: docs comment (others within 5 points) | 68.8% | 50.0% | **+18.8** |
-| Region (all within 15 points) | 42.9%–72.0% | 42.9%–71.4% | −4.8 to +14.8 |
+| Group | 22 Nov automation | Labels expect | Gap (22 Nov) | Gap (13 Nov) |
+|---|---|---|---|---|
+| Tier: business / enterprise / standard | 60.0% / 62.5% / 40.5% | 70.0% / 75.0% / 50.0% | −10.0 / −12.5 / −9.5 | **+20.0** / 0.0 / −2.4 |
+| Fluency: fluent / non-fluent | 54.1% / 36.8% | 65.6% / 42.1% | −11.5 / −5.3 | +3.3 / **+15.8** |
+| Channel: chat / docs comment / email / forum | 54.5% / 31.2% / 61.3% / 36.4% | 59.1% / 50.0% / 67.7% / 54.5% | −4.5 / **−18.8** / −6.5 / **−18.2** | within 5 / **+18.8** / within 5 / within 5 |
+| Region: Asia-Pacific / Europe / Latin America / North America | 57.1% / 56.0% / 14.3% / 48.1% | 71.4% / 64.0% / 42.9% / 51.8% | −14.3 / −8.0 / **−28.6** / −3.7 | all within 15 |
 
-No group is automated *less* than its tickets call for. The three flags are all *over*-automation against the labels. Most of it is the same "answerable" label noise found in the manual review, but not all: VAL-0066, one of the two replies that should have been escalated, comes from a non-fluent customer ("sorry for my english"). Customers who write less precisely are more likely to have a request for action read as a question, so the non-fluent flag is a real risk, and the place to look first when the policy rules are next revised.
+The two runs flag in opposite directions, and both have an explanation that has to be checked rather than assumed:
+
+- **22 November: three flags, all under-automation** (Latin America, documentation comments, forum). Every group sits below its labels because 15 tickets never reached the model. Small groups swing hardest: Latin America has 7 tickets, so one ticket is 14 points. Confirming that the 15 `MODEL_UNAVAILABLE` tickets explain these flags needs the per-ticket results file, which is the first check before acting on them.
+- **13 November: three flags, all over-automation** (Business tier, non-fluent customers, documentation comments). Most is the same "answerable" label noise found in the manual review, but not all: VAL-0066, one of the two replies that should have been escalated, comes from a non-fluent customer ("sorry for my english"). Customers who write less precisely are more likely to have a request for action read as a question, so the non-fluent flag is a real risk, and the place to look first when the policy rules are next revised.
 
 ### Against the PRD targets
 
-| Measure | Target | Result |
-|---|---|---|
-| Escalation rate | 40% or below | ✅ 33.8% |
-| Unsafe automatic replies | Zero | ✅ 0 must-never tickets automated, 0 invented facts; 2 replies should have been escalated |
-| Time to first reply (automatic) | Under 5 minutes | ✅ p95 31.5 s on fresh model calls |
-| First contact resolution | 60% or above | Partly: 48.8% from automation alone; human resolution of escalated tickets adds to this but can't be measured offline |
-| Gap between customer groups | Under 5 points | ❌ Raw automation differs by up to 42 points between tiers, mostly because of ticket mix; against each group's own labels, the largest gap is 20 points |
-| Customer satisfaction, repeat contacts | 4.0, about 11% | Can't be measured offline |
+| Measure | Target | 22 Nov | 13 Nov |
+|---|---|---|---|
+| Escalation rate | 40% or below | ❌ 50.0% as measured; ✅ 31.2% excluding the 15 quota escalations | ✅ 33.8% |
+| Unsafe automatic replies | Zero | ✅ 0 must-never tickets automated | ✅ 0 must-never automated, 0 invented facts; 2 replies should have been escalated |
+| Time to first reply (automatic) | Under 5 minutes | ✅ p95 26.9 s | ✅ p95 31.5 s |
+| First contact resolution | 60% or above | ❌ 38.8% from automation alone | Partly: 48.8% from automation alone |
+| Gap between customer groups | Under 5 points | ❌ largest gap against own labels 28.6 points (7 tickets) | ❌ largest gap against own labels 20 points |
+| Customer satisfaction, repeat contacts | 4.0, about 11% | Can't be measured offline | Can't be measured offline |
+
+Human resolution of escalated tickets adds to first contact resolution but can't be measured offline. On the free tier, a full fresh run needs about 55 model requests against a limit of 50 a day; that, not the design, is what separates the two runs (see [Batch harness](#batch-harness)).
 
 ---
 
@@ -741,7 +752,7 @@ Every component traces back to a requirement, and every requirement traces back 
 - **Free models are slow and rationed.** A fresh answer takes about 6 seconds typically and up to 42 seconds (p95 31.5 s), and the free tier allows 50 requests a day. The cache makes repeat runs free; production would need a paid model.
 - **The pre-send checks catch unsupported claims, not every omission.** Mandatory caveats cover the 14 articles where an omission is costly; elsewhere an answer can still be incomplete (VAL-0025).
 - **The caveats were added after reviewing validation results,** so they are tuned on validation; the hidden test set is where they are confirmed.
-- **About 29% of routes disagree with the client's labels.** Manual review shows most of these are label noise (the articles do answer them), but not all: 2 of 18 reviewed replies should have been escalated (VAL-0066, VAL-0072).
+- **About 29% of routes (35% on 22 November, when 15 tickets could not reach the model) disagree with the client's labels.** Manual review shows most of these are label noise (the articles do answer them), but not all: 2 of 18 reviewed replies should have been escalated (VAL-0066, VAL-0072).
 - **Requests for human action phrased as questions can be answered automatically** (written confirmation for a customer's customer; disputing a charge). Proposed keyword fix in [Evaluation](#manual-review-of-automatic-replies); not applied, to avoid tuning on validation again.
 - **Over-automation for non-fluent customers** against their labels (+16 points). See [Fairness](#fairness).
 - **Validation intent accuracy (100%) overstates real accuracy,** because validation reuses development message templates. 94.8% (held out by text) is the honest figure.
